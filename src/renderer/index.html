@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <title>League Auto Accept</title>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">Windows utility</p>
+          <h1>League Auto Accept</h1>
+        </div>
+        <div class="connection-state">
+          <div id="connectionBadge" class="status-badge disconnected" role="status" aria-live="polite">
+            <span class="status-dot"></span>
+            <span id="connectionLabel">League disconnected</span>
+          </div>
+          <p id="connectionMessage" class="connection-message">Loading application state…</p>
+        </div>
+      </header>
+
+      <div class="content-grid">
+      <div class="left-column">
+      <section class="settings-card automation-card" aria-labelledby="automationHeading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Ready checks</p>
+            <h2 id="automationHeading">Automation</h2>
+          </div>
+          <span class="milestone-tag">Active</span>
+        </div>
+        <label class="toggle-row">
+          <span>
+            <strong>Auto Accept</strong>
+            <small>Accepts one time per ready-check cycle while this app is running.</small>
+          </span>
+          <input id="autoAcceptEnabled" type="checkbox">
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+        <p id="readyCheckStatus" class="automation-status idle" role="status" aria-live="polite">Waiting for a ready check.</p>
+      </section>
+
+      <section class="settings-card desktop-card" aria-labelledby="desktopHeading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Desktop behaviour</p>
+            <h2 id="desktopHeading">System tray</h2>
+          </div>
+        </div>
+        <label class="toggle-row">
+          <span>
+            <strong>Minimize to tray</strong>
+            <small>Minimizing or closing the window keeps the application running.</small>
+          </span>
+          <input id="minimizeToTray" type="checkbox">
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+      </section>
+      </div>
+
+      <section class="settings-card discord-card" aria-labelledby="discordHeading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Optional alerts</p>
+            <h2 id="discordHeading">Discord notifications</h2>
+          </div>
+          <span class="milestone-tag">Available</span>
+        </div>
+
+        <label class="toggle-row">
+          <span>
+            <strong>Enable Discord notifications</strong>
+            <small>Messages will never delay or control Auto Accept.</small>
+          </span>
+          <input id="discordNotificationsEnabled" type="checkbox">
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+
+        <label class="field">
+          <span>Discord webhook URL</span>
+          <input id="discordWebhookUrl" type="password" autocomplete="off" spellcheck="false" placeholder="https://discord.com/api/webhooks/…">
+          <small>Stored locally with Windows-backed encryption when available.</small>
+        </label>
+
+        <fieldset class="field-group">
+          <legend>People to mention <span>(local nickname + Discord user ID, up to five)</span></legend>
+          <div id="discordUserIds" class="user-id-list"></div>
+          <button id="addDiscordUserId" class="secondary-button" type="button">Add person</button>
+        </fieldset>
+
+        <fieldset class="field-group">
+          <legend>Notification events</legend>
+          <div class="checkbox-grid">
+            <label><input id="eventQueuePopped" type="checkbox"> Queue popped</label>
+            <label><input id="eventAutoAccepted" type="checkbox"> Auto accepted</label>
+            <label><input id="eventGameStarted" type="checkbox"> Game started</label>
+          </div>
+        </fieldset>
+
+        <div class="message-grid">
+          <label class="field">
+            <span>Queue popped message</span>
+            <textarea id="messageQueuePopped" rows="2"></textarea>
+          </label>
+          <label class="field">
+            <span>Auto accepted message</span>
+            <textarea id="messageAutoAccepted" rows="2"></textarea>
+          </label>
+          <label class="field">
+            <span>Game started message</span>
+            <textarea id="messageGameStarted" rows="2"></textarea>
+          </label>
+        </div>
+
+        <div class="preview-panel">
+          <span>Local message preview</span>
+          <p id="messagePreview">Add user IDs to preview mentions.</p>
+          <small>Use <code>{mentions}</code> for everyone. Nicknames appear only in this local preview.</small>
+        </div>
+
+        <div class="action-row">
+          <button id="testWebhook" class="primary-button" type="button">Test Webhook</button>
+          <small id="webhookTestStatus" role="status" aria-live="polite">Uses the saved webhook URL and configured mentions.</small>
+        </div>
+      </section>
+
+      </div>
+
+      <footer>
+        <span id="saveStatus" role="status" aria-live="polite">Settings are stored locally.</span>
+        <span>v0.1.0</span>
+      </footer>
+    </main>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

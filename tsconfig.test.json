@@ -1,0 +1,27 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "rootDir": "src",
+    "outDir": ".test-dist",
+    "sourceMap": true
+  },
+  "include": [
+    "src/main/settings-store.ts",
+    "src/main/settings-store.test.ts",
+    "src/main/auto-accept-controller.ts",
+    "src/main/auto-accept-controller.test.ts",
+    "src/main/discord-webhook-client.ts",
+    "src/main/discord-webhook-client.test.ts",
+    "src/main/discord-notification-service.ts",
+    "src/main/discord-notification-service.test.ts",
+    "src/main/lcu/**/*.ts",
+    "src/shared/contracts.ts",
+    "src/shared/settings.ts",
+    "src/shared/settings.test.ts"
+  ]
+}

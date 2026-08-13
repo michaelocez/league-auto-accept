@@ -1,0 +1,92 @@
+{
+  "name": "league-auto-accept",
+  "version": "0.1.0",
+  "description": "A focused Windows Electron utility for League of Legends ready checks.",
+  "author": "michaelocez",
+  "license": "MIT",
+  "private": true,
+  "main": "dist-electron/main/main.js",
+  "scripts": {
+    "postinstall": "node scripts/ensure-electron.mjs",
+    "dev": "npm-run-all -p dev:renderer dev:electron",
+    "dev:renderer": "vite --configLoader native --host 127.0.0.1",
+    "dev:electron": "wait-on tcp:5173 && npm run build:electron && electron . --serve",
+    "lint": "eslint \"src/**/*.ts\"",
+    "typecheck": "npm run typecheck:electron && npm run typecheck:renderer && npm run typecheck:test",
+    "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit",
+    "typecheck:renderer": "tsc -p tsconfig.renderer.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:renderer": "vite build --configLoader native",
+    "build:test": "tsc -p tsconfig.test.json",
+    "build": "npm run build:electron && npm run build:renderer",
+    "test": "npm run build:test && node --test --test-isolation=none .test-dist/shared/settings.test.js .test-dist/main/settings-store.test.js .test-dist/main/lcu/client-locator.test.js .test-dist/main/lcu/lcu-client.test.js .test-dist/main/lcu/websocket-frame-decoder.test.js .test-dist/main/lcu/lcu-controller.test.js .test-dist/main/auto-accept-controller.test.js .test-dist/main/discord-webhook-client.test.js .test-dist/main/discord-notification-service.test.js",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run build",
+    "package:win": "npm run build && electron-builder --win nsis --publish never"
+  },
+  "build": {
+    "appId": "nz.co.michaelocez.leagueautoaccept",
+    "productName": "League Auto Accept",
+    "asar": true,
+    "npmRebuild": false,
+    "electronLanguages": [
+      "en-US",
+      "en-GB"
+    ],
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "!dist-electron/**/*.map",
+      "assets/**/*",
+      "package.json",
+      "LICENSE",
+      "NOTICE.md"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "differentialPackage": false,
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "League Auto Accept",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "artifactName": "League-Auto-Accept-Setup-${version}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.0.0",
+    "@typescript-eslint/eslint-plugin": "8.65.0",
+    "@typescript-eslint/parser": "8.65.0",
+    "electron": "43.2.0",
+    "electron-builder": "26.15.3",
+    "eslint": "10.0.1",
+    "npm-run-all": "4.1.5",
+    "typescript": "6.0.3",
+    "vite": "7.3.5",
+    "wait-on": "9.0.4"
+  },
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10.0.0"
+  },
+  "allowScripts": {
+    "electron@43.2.0": true
+  }
+}
