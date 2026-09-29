@@ -119,7 +119,12 @@ impl ClientLocator {
 
 fn normalise_path(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
-    let trimmed = raw.trim().trim_matches('"');
+    let trimmed = raw.trim().trim_matches('"').to_string();
+    // Riot's product_settings.yaml writes forward slashes; the fallback path uses backslashes.
+    // Normalise separators so the same installation de-duplicates on Windows (as `path.resolve()`
+    // does in the reference implementation).
+    #[cfg(windows)]
+    let trimmed = trimmed.replace('/', "\\");
     PathBuf::from(trimmed)
 }
 
@@ -230,6 +235,22 @@ mod tests {
         let locator = ClientLocator::new(Some(metadata_root), vec![install_path.clone()]);
         assert!(locator.find_running_client().is_none());
         assert_eq!(locator.discover_install_paths(), vec![install_path]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deduplicates_paths_that_differ_only_by_separator() {
+        let root = tempdir().unwrap();
+        let install_path = root.path().join("League of Legends");
+        fs::create_dir_all(&install_path).unwrap();
+        fs::write(install_path.join("lockfile"), "x").unwrap();
+        // Riot's product_settings.yaml writes forward slashes; the fallback uses backslashes.
+        let forward = PathBuf::from(install_path.to_string_lossy().replace('\\', "/"));
+        let locator = ClientLocator::new(
+            Some(root.path().join("empty-metadata")),
+            vec![forward, install_path.clone()],
+        );
+        assert_eq!(locator.discover_install_paths().len(), 1);
     }
 
     #[test]
