@@ -175,10 +175,10 @@ impl WebSocketFrameDecoder {
     }
 }
 
-/// Encodes a masked client text frame (the LCU subscription is the only client frame we send).
-pub fn encode_masked_text(payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
+/// Encodes a masked client frame (client frames must be masked).
+pub fn encode_masked(opcode: u8, payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 14);
-    out.push(0x81);
+    out.push(0x80 | opcode);
     if payload.len() < 126 {
         out.push(0x80 | payload.len() as u8);
     } else if payload.len() < 65536 {
@@ -194,6 +194,11 @@ pub fn encode_masked_text(payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
         out.push(byte ^ mask[index % 4]);
     }
     out
+}
+
+/// Encodes a masked client text frame (the LCU subscription is the only client text frame).
+pub fn encode_masked_text(payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
+    encode_masked(0x1, payload, mask)
 }
 
 #[cfg(test)]

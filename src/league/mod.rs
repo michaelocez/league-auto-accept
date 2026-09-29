@@ -11,6 +11,8 @@ pub mod discovery;
 pub mod frame;
 pub mod lockfile;
 pub mod ready_check;
+pub mod service;
+pub mod transport;
 
 /// Health/verification endpoint (`LcuClient.verify`).
 pub const SUMMONER_ENDPOINT: &str = "/lol-summoner/v1/current-summoner";
