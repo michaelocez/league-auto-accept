@@ -1,0 +1,37 @@
+[package]
+name = "league-auto-accept"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "A focused Windows utility for League of Legends ready checks (Rust + GPUI rewrite)."
+license = "MIT"
+publish = false
+
+[dependencies]
+gpui = "0.2.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
+async-channel = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tray-icon = "0.25"
+muda = "0.20"
+image = { version = "0.25", default-features = false, features = ["png"] }
+log = "0.4"
+env_logger = "0.11"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tokio-rustls = "0.26"
+rustls = "0.23"
+rcgen = "0.13"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
