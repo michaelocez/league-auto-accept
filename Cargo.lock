@@ -3404,6 +3404,7 @@ dependencies = [
  "image",
  "log",
  "muda",
+ "raw-window-handle",
  "rcgen",
  "rustls",
  "serde",
