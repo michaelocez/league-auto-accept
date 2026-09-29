@@ -1,10 +1,16 @@
 //! League Client (LCU) integration.
 //!
-//! Phase 1 only proves the WebSocket transport (see `tests/lcu_ws_spike.rs`). Discovery,
-//! authentication, the REST client and the ready-check state machine arrive in Phase 2
-//! (AGENTS.md sec.10). The endpoint constants below are the fixed set from the reference
+//! Phase 2 implements the headless service core: lockfile parsing, installation discovery,
+//! endpoint validation/request construction, WebSocket frame decoding and the ready-check /
+//! auto-accept state machine. The constants below are the fixed set from the reference
 //! implementation (`Electron V1/src/main/auto-accept-controller.ts`); arbitrary endpoints
 //! are explicitly out of scope.
+
+pub mod api;
+pub mod discovery;
+pub mod frame;
+pub mod lockfile;
+pub mod ready_check;
 
 /// Health/verification endpoint (`LcuClient.verify`).
 pub const SUMMONER_ENDPOINT: &str = "/lol-summoner/v1/current-summoner";
