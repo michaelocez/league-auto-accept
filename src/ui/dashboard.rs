@@ -1,28 +1,38 @@
-//! Main window: a compact status + control surface for Auto Accept.
+//! Main window: dashboard + settings for Auto Accept and Discord notifications.
 //!
-//! The view renders `AppState` and emits user intents (toggles) that are applied to the settings
-//! store and the shared service enable flag. It contains no networking, credentials or filesystem
-//! logic beyond the typed settings service (AGENTS.md sec.13).
+//! The view renders `AppState` and emits user intents (toggles, Test Webhook). It contains no
+//! networking, credentials or secret handling — those live in the app/notifications services.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use gpui::{div, prelude::*, rgb, ClickEvent, Context, FocusHandle, IntoElement, Render, Window};
 use serde_json::json;
 
 use crate::app::events::{AppEvent, EventOutcome};
+use crate::app::service::NotificationCommand;
 use crate::app::state::{ActivityKind, AppState};
 use crate::config::settings::AppSettings;
 use crate::config::store::SettingsStore;
+use crate::notifications::discord::parse_discord_webhook_url;
 use crate::platform::tray::TrayCommand;
 use crate::ui::theme;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Dashboard,
+    Settings,
+}
 
 pub struct Dashboard {
     pub state: AppState,
     store: Rc<RefCell<SettingsStore>>,
     enabled_flag: Arc<AtomicBool>,
+    settings_shared: Arc<RwLock<AppSettings>>,
+    notifications: async_channel::Sender<NotificationCommand>,
+    screen: Screen,
     focus_handle: FocusHandle,
 }
 
@@ -31,12 +41,17 @@ impl Dashboard {
         settings: AppSettings,
         store: Rc<RefCell<SettingsStore>>,
         enabled_flag: Arc<AtomicBool>,
+        settings_shared: Arc<RwLock<AppSettings>>,
+        notifications: async_channel::Sender<NotificationCommand>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             state: AppState::new(settings),
             store,
             enabled_flag,
+            settings_shared,
+            notifications,
+            screen: Screen::Dashboard,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -45,10 +60,14 @@ impl Dashboard {
         &self.state
     }
 
-    /// Persists a settings patch through the typed store and mirrors the result into state.
     fn persist(&mut self, patch: serde_json::Value) {
         match self.store.borrow_mut().update(&patch) {
-            Ok(updated) => self.state.settings = updated,
+            Ok(updated) => {
+                self.state.settings = updated.clone();
+                if let Ok(mut guard) = self.settings_shared.write() {
+                    *guard = updated;
+                }
+            }
             Err(error) => log::error!("failed to persist settings: {error}"),
         }
     }
@@ -61,9 +80,8 @@ impl Dashboard {
                 let next = !self.state.settings.auto_accept_enabled;
                 self.set_auto_accept(next);
             }
-            AppEvent::Service(service_event) => {
-                self.state.apply_service_event(&service_event);
-            }
+            AppEvent::Service(service_event) => self.state.apply_service_event(&service_event),
+            AppEvent::WebhookTest(result) => self.state.webhook_test = Some(result),
         }
         EventOutcome::Continue
     }
@@ -147,12 +165,37 @@ impl Dashboard {
                     .child(div().size(gpui::px(13.0)).bg(knob).rounded_full()),
             )
     }
-}
 
-impl Render for Dashboard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let summary = self.state.summary();
-        let pill_color = status_color(summary);
+    fn nav_pill(
+        id: &'static str,
+        label: &'static str,
+        active: bool,
+        cx: &mut Context<Self>,
+        screen: Screen,
+    ) -> impl IntoElement {
+        let (background, foreground) = if active {
+            (theme::surface_raised(), theme::text_primary())
+        } else {
+            (theme::surface(), theme::text_secondary())
+        };
+        div()
+            .id(id)
+            .px_3()
+            .py_1()
+            .bg(background)
+            .border_1()
+            .border_color(theme::border())
+            .rounded_full()
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme::text_primary()))
+            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                this.screen = screen;
+                cx.notify();
+            }))
+            .child(div().text_sm().text_color(foreground).child(label))
+    }
+
+    fn render_dashboard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let auto_accept = self.state.settings.auto_accept_enabled;
         let minimize = self.state.settings.minimize_to_tray;
         let connection_message = self.state.connection_message.clone();
@@ -198,43 +241,7 @@ impl Render for Dashboard {
         div()
             .flex()
             .flex_col()
-            .size_full()
-            .bg(theme::background())
-            .text_color(theme::text_primary())
-            .p_6()
             .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_xl().child("League Auto Accept"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme::text_secondary())
-                                    .child("Ready-check automation"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .py_1()
-                            .border_1()
-                            .border_color(theme::border())
-                            .rounded_full()
-                            .child(div().size(gpui::px(7.0)).bg(pill_color).rounded_full())
-                            .child(div().text_sm().child(summary.to_string())),
-                    ),
-            )
             .child(
                 div()
                     .text_sm()
@@ -275,7 +282,6 @@ impl Render for Dashboard {
                 minimize,
                 cx.listener(|this, _event: &ClickEvent, _window, cx| {
                     let next = !this.state.settings.minimize_to_tray;
-                    this.state.settings.minimize_to_tray = next;
                     this.persist(json!({ "minimizeToTray": next }));
                     cx.notify();
                 }),
@@ -315,6 +321,183 @@ impl Render for Dashboard {
                         .child(div().text_color(rgb(0xffffff)).child("Quit")),
                 ),
             )
+            .into_any_element()
+    }
+
+    fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let discord_enabled = self.state.settings.discord_notifications_enabled;
+        let webhook = self.state.settings.discord_webhook_url.clone();
+        let webhook_label = match parse_discord_webhook_url(&webhook) {
+            Some(target) => format!("Webhook configured ({})", target.host),
+            None if webhook.is_empty() => "No webhook configured".to_string(),
+            None => "Webhook URL is invalid".to_string(),
+        };
+        let mentions = self.state.settings.discord_mentions.len();
+        let (test_message, test_color) = match &self.state.webhook_test {
+            Some(result) if result.ok => (result.message.clone(), theme::success()),
+            Some(result) => (result.message.clone(), theme::danger()),
+            None => (
+                "Uses the saved webhook URL and configured mentions.".to_string(),
+                theme::text_secondary(),
+            ),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_color(theme::text_primary()).child("Discord notifications"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::text_secondary())
+                            .child("Messages are downstream of Auto Accept and never delay or control it."),
+                    ),
+            )
+            .child(Self::toggle_card(
+                "toggle-discord",
+                "Enable Discord notifications",
+                "Queue popped, auto-accepted and game-started alerts.",
+                discord_enabled,
+                cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                    let next = !this.state.settings.discord_notifications_enabled;
+                    this.persist(json!({ "discordNotificationsEnabled": next }));
+                    cx.notify();
+                }),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .bg(theme::surface())
+                    .border_1()
+                    .border_color(theme::border())
+                    .rounded_lg()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::text_secondary())
+                            .child(webhook_label),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::text_secondary())
+                            .child(format!("People to mention: {mentions}")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::text_secondary())
+                            .child("Editing the webhook, templates and mentions arrives with the form controls (gpui-base evaluation)."),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .id("test-webhook")
+                            .px_4()
+                            .py_2()
+                            .bg(theme::accent())
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|style| style.opacity(0.9))
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                this.state.webhook_test = None;
+                                let _ = this.notifications.try_send(NotificationCommand::TestWebhook);
+                                cx.notify();
+                            }))
+                            .child(div().text_color(rgb(0xffffff)).child("Test Webhook")),
+                    )
+                    .child(div().text_sm().text_color(test_color).child(test_message)),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for Dashboard {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let summary = self.state.summary();
+        let pill_color = status_color(summary);
+        let screen = self.screen;
+        let body = match screen {
+            Screen::Dashboard => self.render_dashboard(cx),
+            Screen::Settings => self.render_settings(cx),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(theme::background())
+            .text_color(theme::text_primary())
+            .p_6()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_xl().child("League Auto Accept"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme::text_secondary())
+                                    .child("Ready-check automation"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(Self::nav_pill(
+                                "nav-dashboard",
+                                "Dashboard",
+                                screen == Screen::Dashboard,
+                                cx,
+                                Screen::Dashboard,
+                            ))
+                            .child(Self::nav_pill(
+                                "nav-settings",
+                                "Settings",
+                                screen == Screen::Settings,
+                                cx,
+                                Screen::Settings,
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_3()
+                                    .py_1()
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .rounded_full()
+                                    .child(div().size(gpui::px(7.0)).bg(pill_color).rounded_full())
+                                    .child(div().text_sm().child(summary.to_string())),
+                            ),
+                    ),
+            )
+            .child(body)
             .track_focus(&self.focus_handle)
     }
 }

@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
 
@@ -43,12 +43,30 @@ fn main() {
         let _ = show_tx.try_send(AppEvent::Tray(tray::TrayCommand::ShowWindow));
     });
 
-    // Headless League service + tray on their own threads.
-    let enabled_flag = spawn_league_service(tx.clone(), settings.auto_accept_enabled);
+    // Shared settings snapshot: the UI updates it, the notification service reads it.
+    let settings_shared = Arc::new(RwLock::new(settings.clone()));
+
+    // Headless League service + notifications + tray on their own threads.
+    let background = spawn_league_service(
+        tx.clone(),
+        settings_shared.clone(),
+        settings.auto_accept_enabled,
+    );
+    let enabled_flag = background.enabled_flag.clone();
+    let notifications = background.notifications.clone();
     tray::spawn(tx.clone());
 
     Application::new().run(move |cx: &mut App| {
-        let view = cx.new(|cx| Dashboard::new(settings, store.clone(), enabled_flag.clone(), cx));
+        let view = cx.new(|cx| {
+            Dashboard::new(
+                settings,
+                store.clone(),
+                enabled_flag.clone(),
+                settings_shared.clone(),
+                notifications.clone(),
+                cx,
+            )
+        });
 
         let bounds = Bounds::centered(None, size(px(620.0), px(560.0)), cx);
         let window_handle = cx

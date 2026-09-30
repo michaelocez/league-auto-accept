@@ -1,6 +1,7 @@
 use crate::config::settings::AppSettings;
 use crate::league::ready_check::{Lifecycle, Status as LeagueStatus};
 use crate::league::service::ServiceEvent;
+use crate::notifications::discord::WebhookResult;
 
 /// A recent activity entry shown on the dashboard.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +85,8 @@ pub struct AppState {
     pub ready_check_message: String,
     /// Recent lifecycle activity, newest first (bounded).
     pub activity: Vec<ActivityItem>,
+    /// Last Test Webhook result, if any.
+    pub webhook_test: Option<WebhookResult>,
 }
 
 impl AppState {
@@ -95,6 +98,7 @@ impl AppState {
             ready_check: ReadyCheckStatus::Idle,
             ready_check_message: "Waiting for a ready check.".to_string(),
             activity: Vec::new(),
+            webhook_test: None,
         }
     }
 
