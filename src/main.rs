@@ -16,6 +16,7 @@ use league_auto_accept::app::service::spawn_league_service;
 use league_auto_accept::config::store::{default_settings_directory, SettingsStore};
 use league_auto_accept::platform::{single_instance, tray, window as platform_window};
 use league_auto_accept::ui::dashboard::Dashboard;
+use league_auto_accept::ui::theme::{self, Appearance};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -58,6 +59,10 @@ fn main() {
 
     gpui::application().run(move |cx: &mut App| {
         gpui::init(cx);
+
+        // Establish the single source of truth for the active visual appearance before any view
+        // renders. Later phases flip this from the title-bar theme toggle.
+        theme::set_appearance(cx, Appearance::Dark);
 
         // Capture the native window handle once (pure Win32 hide/show; no re-entrant GPUI borrows).
         let hwnd_slot = Arc::new(AtomicIsize::new(0));
