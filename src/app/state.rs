@@ -87,6 +87,8 @@ pub struct AppState {
     pub activity: Vec<ActivityItem>,
     /// Last Test Webhook result, if any.
     pub webhook_test: Option<WebhookResult>,
+    /// Whether a Test Webhook request is in flight.
+    pub webhook_testing: bool,
 }
 
 impl AppState {
@@ -99,6 +101,7 @@ impl AppState {
             ready_check_message: "Waiting for a ready check.".to_string(),
             activity: Vec::new(),
             webhook_test: None,
+            webhook_testing: false,
         }
     }
 

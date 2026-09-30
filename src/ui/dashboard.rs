@@ -8,7 +8,11 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use gpui::{div, prelude::*, rgb, ClickEvent, Context, FocusHandle, IntoElement, Render, Window};
+use gpui::base::input::{Input, InputEvent, InputState};
+use gpui::{
+    div, prelude::*, rgb, ClickEvent, Context, Entity, FocusHandle, IntoElement, Render,
+    Subscription, Window,
+};
 use serde_json::json;
 
 use crate::app::events::{AppEvent, EventOutcome};
@@ -32,25 +36,47 @@ pub struct Dashboard {
     enabled_flag: Arc<AtomicBool>,
     settings_shared: Arc<RwLock<AppSettings>>,
     notifications: async_channel::Sender<NotificationCommand>,
+    webhook: Entity<InputState>,
+    webhook_draft: String,
+    #[allow(dead_code)]
+    subscriptions: Vec<Subscription>,
     screen: Screen,
     focus_handle: FocusHandle,
 }
 
 impl Dashboard {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         settings: AppSettings,
         store: Rc<RefCell<SettingsStore>>,
         enabled_flag: Arc<AtomicBool>,
         settings_shared: Arc<RwLock<AppSettings>>,
         notifications: async_channel::Sender<NotificationCommand>,
+        webhook: Entity<InputState>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let webhook_draft = settings.discord_webhook_url.clone();
+        let subscription = cx.subscribe_in(
+            &webhook,
+            window,
+            |this, state, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.webhook_draft = state.read(cx).value().to_string();
+                    this.persist(json!({ "discordWebhookUrl": this.webhook_draft.clone() }));
+                    cx.notify();
+                }
+            },
+        );
         Self {
             state: AppState::new(settings),
             store,
             enabled_flag,
             settings_shared,
             notifications,
+            webhook,
+            webhook_draft,
+            subscriptions: vec![subscription],
             screen: Screen::Dashboard,
             focus_handle: cx.focus_handle(),
         }
@@ -81,7 +107,10 @@ impl Dashboard {
                 self.set_auto_accept(next);
             }
             AppEvent::Service(service_event) => self.state.apply_service_event(&service_event),
-            AppEvent::WebhookTest(result) => self.state.webhook_test = Some(result),
+            AppEvent::WebhookTest(result) => {
+                self.state.webhook_test = Some(result);
+                self.state.webhook_testing = false;
+            }
         }
         EventOutcome::Continue
     }
@@ -326,20 +355,26 @@ impl Dashboard {
 
     fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let discord_enabled = self.state.settings.discord_notifications_enabled;
-        let webhook = self.state.settings.discord_webhook_url.clone();
-        let webhook_label = match parse_discord_webhook_url(&webhook) {
-            Some(target) => format!("Webhook configured ({})", target.host),
-            None if webhook.is_empty() => "No webhook configured".to_string(),
-            None => "Webhook URL is invalid".to_string(),
-        };
         let mentions = self.state.settings.discord_mentions.len();
-        let (test_message, test_color) = match &self.state.webhook_test {
-            Some(result) if result.ok => (result.message.clone(), theme::success()),
-            Some(result) => (result.message.clone(), theme::danger()),
-            None => (
-                "Uses the saved webhook URL and configured mentions.".to_string(),
-                theme::text_secondary(),
-            ),
+        let testing = self.state.webhook_testing;
+        let webhook_error = if self.webhook_draft.trim().is_empty() {
+            String::new()
+        } else if parse_discord_webhook_url(&self.webhook_draft).is_none() {
+            "Enter a valid Discord webhook URL.".to_string()
+        } else {
+            String::new()
+        };
+        let (test_message, test_color) = if testing {
+            ("Sending test webhook…".to_string(), theme::text_secondary())
+        } else {
+            match &self.state.webhook_test {
+                Some(result) if result.ok => (result.message.clone(), theme::success()),
+                Some(result) => (result.message.clone(), theme::danger()),
+                None => (
+                    "Uses the saved webhook URL and configured mentions.".to_string(),
+                    theme::text_secondary(),
+                ),
+            }
         };
 
         div()
@@ -351,13 +386,14 @@ impl Dashboard {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_color(theme::text_primary()).child("Discord notifications"))
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(theme::text_secondary())
-                            .child("Messages are downstream of Auto Accept and never delay or control it."),
-                    ),
+                            .text_color(theme::text_primary())
+                            .child("Discord notifications"),
+                    )
+                    .child(div().text_sm().text_color(theme::text_secondary()).child(
+                        "Messages are downstream of Auto Accept and never delay or control it.",
+                    )),
             )
             .child(Self::toggle_card(
                 "toggle-discord",
@@ -385,19 +421,20 @@ impl Dashboard {
                         div()
                             .text_sm()
                             .text_color(theme::text_secondary())
-                            .child(webhook_label),
+                            .child("Discord webhook URL"),
+                    )
+                    .child(Input::new(&self.webhook))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::danger())
+                            .child(webhook_error),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(theme::text_secondary())
                             .child(format!("People to mention: {mentions}")),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::text_secondary())
-                            .child("Editing the webhook, templates and mentions arrives with the form controls (gpui-base evaluation)."),
                     ),
             )
             .child(
@@ -413,13 +450,24 @@ impl Dashboard {
                             .bg(theme::accent())
                             .rounded_md()
                             .cursor_pointer()
+                            .opacity(if testing { 0.6 } else { 1.0 })
                             .hover(|style| style.opacity(0.9))
                             .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                if this.state.webhook_testing {
+                                    return;
+                                }
                                 this.state.webhook_test = None;
-                                let _ = this.notifications.try_send(NotificationCommand::TestWebhook);
+                                this.state.webhook_testing = true;
+                                let _ = this
+                                    .notifications
+                                    .try_send(NotificationCommand::TestWebhook);
                                 cx.notify();
                             }))
-                            .child(div().text_color(rgb(0xffffff)).child("Test Webhook")),
+                            .child(div().text_color(rgb(0xffffff)).child(if testing {
+                                "Sending…"
+                            } else {
+                                "Test Webhook"
+                            })),
                     )
                     .child(div().text_sm().text_color(test_color).child(test_message)),
             )

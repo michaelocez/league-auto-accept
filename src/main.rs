@@ -79,6 +79,16 @@ fn main() {
                     if let Some(hwnd) = platform_window::raw_hwnd(window) {
                         hwnd_slot.store(hwnd as isize, Ordering::SeqCst);
                     }
+                    let webhook_value = settings.discord_webhook_url.clone();
+                    let webhook_input = cx.new(|cx| {
+                        let mut state = gpui::base::input::InputState::new(window, cx)
+                            .placeholder("https://discord.com/api/webhooks/…")
+                            .masked(true);
+                        if !webhook_value.is_empty() {
+                            state.set_value(webhook_value.clone(), window, cx);
+                        }
+                        state
+                    });
                     let view = cx.new(|cx| {
                         Dashboard::new(
                             settings,
@@ -86,6 +96,8 @@ fn main() {
                             enabled_flag,
                             settings_shared,
                             notifications,
+                            webhook_input,
+                            window,
                             cx,
                         )
                     });
