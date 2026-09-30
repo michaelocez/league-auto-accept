@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
+use gpui::{prelude::*, px, size, App, Bounds, WindowBounds, WindowOptions};
 
 use league_auto_accept::app::events::{AppEvent, EventOutcome};
 use league_auto_accept::app::service::spawn_league_service;
@@ -56,68 +56,64 @@ fn main() {
     let notifications = background.notifications.clone();
     tray::spawn(tx.clone());
 
-    Application::new().run(move |cx: &mut App| {
-        let view = cx.new(|cx| {
-            Dashboard::new(
-                settings,
-                store.clone(),
-                enabled_flag.clone(),
-                settings_shared.clone(),
-                notifications.clone(),
-                cx,
-            )
-        });
+    gpui::application().run(move |cx: &mut App| {
+        gpui::init(cx);
 
-        let bounds = Bounds::centered(None, size(px(620.0), px(560.0)), cx);
-        let window_handle = cx
-            .open_window(
+        // Capture the native window handle once (pure Win32 hide/show; no re-entrant GPUI borrows).
+        let hwnd_slot = Arc::new(AtomicIsize::new(0));
+        let view = {
+            let hwnd_slot = hwnd_slot.clone();
+            let store = store.clone();
+            let enabled_flag = enabled_flag.clone();
+            let settings_shared = settings_shared.clone();
+            let notifications = notifications.clone();
+            let settings = settings.clone();
+            let bounds = Bounds::centered(None, size(px(620.0), px(560.0)), cx);
+            let (_handle, view) = gpui::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                {
-                    let view = view.clone();
-                    move |window, cx| {
-                        let view_for_close = view.clone();
-                        // Hide (don't close) when minimize-to-tray is on; the window — and all
-                        // state — is preserved and restored in place from the tray.
-                        window.on_window_should_close(cx, move |window, cx| {
-                            let minimize_to_tray =
-                                view_for_close.read(cx).state().settings.minimize_to_tray;
-                            if minimize_to_tray {
-                                log::info!("close intercepted: hiding to tray");
-                                platform_window::hide(window);
-                                false
-                            } else {
-                                log::info!("close allowed: exiting application");
-                                true
-                            }
-                        });
-                        view
+                cx,
+                move |window, cx| {
+                    if let Some(hwnd) = platform_window::raw_hwnd(window) {
+                        hwnd_slot.store(hwnd as isize, Ordering::SeqCst);
                     }
+                    let view = cx.new(|cx| {
+                        Dashboard::new(
+                            settings,
+                            store,
+                            enabled_flag,
+                            settings_shared,
+                            notifications,
+                            cx,
+                        )
+                    });
+                    let view_for_close = view.clone();
+                    // Hide (don't close) when minimize-to-tray is on; the window — and all state —
+                    // is preserved and restored in place from the tray.
+                    window.on_window_should_close(cx, move |window, cx| {
+                        let minimize_to_tray =
+                            view_for_close.read(cx).state().settings.minimize_to_tray;
+                        if minimize_to_tray {
+                            log::info!("close intercepted: hiding to tray");
+                            platform_window::hide(window);
+                            false
+                        } else {
+                            log::info!("close allowed: exiting application");
+                            true
+                        }
+                    });
+                    view
                 },
             )
             .expect("failed to open window");
-
-        // Capture the native window handle once. Showing/hiding is then pure Win32, avoiding
-        // any re-entrant GPUI borrows from the async event loop. The window is only ever
-        // hidden, so this handle stays valid for the process lifetime.
-        let hwnd_slot = Arc::new(AtomicIsize::new(0));
-        if window_handle
-            .update(cx, |_view, window, _cx| {
-                if let Some(hwnd) = platform_window::raw_hwnd(window) {
-                    hwnd_slot.store(hwnd as isize, Ordering::SeqCst);
-                }
-            })
-            .is_err()
-        {
-            log::warn!("failed to capture the native window handle");
-        }
+            view
+        };
 
         cx.activate(true);
 
         // Bridge: drain backend/tray events on the GPUI foreground executor and update state.
-        let view = view.clone();
         let hwnd_slot = hwnd_slot.clone();
         cx.spawn(async move |cx| {
             while let Ok(event) = rx.recv().await {
@@ -129,17 +125,17 @@ fn main() {
                     })
                 });
                 match outcome {
-                    Ok(EventOutcome::ShowWindow) => {
+                    EventOutcome::ShowWindow => {
                         let raw = hwnd_slot.load(Ordering::SeqCst);
                         if raw != 0 {
                             platform_window::show_hwnd(raw);
                         }
                     }
-                    Ok(EventOutcome::Quit) | Err(_) => {
-                        let _ = cx.update(|app| app.quit());
+                    EventOutcome::Quit => {
+                        cx.update(|app| app.quit());
                         break;
                     }
-                    Ok(EventOutcome::Continue) => {}
+                    EventOutcome::Continue => {}
                 }
             }
         })
