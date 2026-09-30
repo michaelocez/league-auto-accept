@@ -9,9 +9,7 @@ use std::sync::Arc;
 use crate::config::settings::AppSettings;
 use crate::league::ready_check::Lifecycle;
 
-use super::discord::{
-    render_notification_message, DiscordSender, WebhookFuture, WebhookRequest,
-};
+use super::discord::{render_notification_message, DiscordSender, WebhookFuture, WebhookRequest};
 
 /// Reads the current settings snapshot.
 pub type SettingsSnapshot = Arc<dyn Fn() -> AppSettings + Send + Sync>;
@@ -111,12 +109,10 @@ mod tests {
                 "1".repeat(17),
                 "t".repeat(40)
             ),
-            discord_mentions: vec![
-                crate::config::settings::DiscordMention {
-                    id: "12345678901234567".into(),
-                    nickname: "Michael".into(),
-                },
-            ],
+            discord_mentions: vec![crate::config::settings::DiscordMention {
+                id: "12345678901234567".into(),
+                nickname: "Michael".into(),
+            }],
             notification_events: crate::config::settings::NotificationEvents {
                 queue_popped: true,
                 auto_accepted: true,

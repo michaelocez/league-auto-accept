@@ -184,7 +184,9 @@ impl DiscordSender for DiscordWebhookClient {
             };
             let content = request.content.trim();
             if content.is_empty() || content.chars().count() > MAX_CONTENT_LENGTH {
-                return WebhookResult::failure("The Discord message must contain 1–2,000 characters.");
+                return WebhookResult::failure(
+                    "The Discord message must contain 1–2,000 characters.",
+                );
             }
             if !request
                 .user_ids
@@ -202,11 +204,7 @@ impl DiscordSender for DiscordWebhookClient {
     }
 }
 
-async fn post(
-    config: &Arc<ClientConfig>,
-    target: &WebhookTarget,
-    body: &str,
-) -> WebhookResult {
+async fn post(config: &Arc<ClientConfig>, target: &WebhookTarget, body: &str) -> WebhookResult {
     let tcp = match TcpStream::connect((target.host.as_str(), 443u16)).await {
         Ok(stream) => stream,
         Err(_) => return WebhookResult::failure("Discord webhook request failed."),
@@ -271,8 +269,7 @@ async fn post(
 
 /// Convenience for tests: build the `{content, allowed_mentions}` JSON as a `Value`.
 pub fn payload_value(content: &str, user_ids: &[String]) -> Value {
-    serde_json::from_str(&discord_webhook_payload(content, user_ids))
-        .unwrap_or(Value::Null)
+    serde_json::from_str(&discord_webhook_payload(content, user_ids)).unwrap_or(Value::Null)
 }
 
 #[cfg(test)]
@@ -287,8 +284,11 @@ mod tests {
     fn allows_only_known_discord_https_webhook_urls() {
         let id = "1".repeat(17);
         assert_eq!(
-            parse_discord_webhook_url(&format!("https://discord.com/api/webhooks/{id}/{}", token()))
-                .map(|t| t.host),
+            parse_discord_webhook_url(&format!(
+                "https://discord.com/api/webhooks/{id}/{}",
+                token()
+            ))
+            .map(|t| t.host),
             Some("discord.com".into())
         );
         assert_eq!(
@@ -306,10 +306,19 @@ mod tests {
         let id = "1".repeat(17);
         let invalid = [
             format!("http://discord.com/api/webhooks/{id}/{}", token()),
-            format!("https://discord.com.evil.test/api/webhooks/{id}/{}", token()),
-            format!("https://user:pass@discord.com/api/webhooks/{id}/{}", token()),
+            format!(
+                "https://discord.com.evil.test/api/webhooks/{id}/{}",
+                token()
+            ),
+            format!(
+                "https://user:pass@discord.com/api/webhooks/{id}/{}",
+                token()
+            ),
             format!("https://discord.com:444/api/webhooks/{id}/{}", token()),
-            format!("https://discord.com/api/webhooks/{id}/{}?wait=true", token()),
+            format!(
+                "https://discord.com/api/webhooks/{id}/{}?wait=true",
+                token()
+            ),
             "https://discord.com/api/webhooks/not-an-id/token".into(),
         ];
         for value in invalid {
@@ -334,11 +343,17 @@ mod tests {
 
     #[test]
     fn renders_all_mentions_everywhere() {
-        let ids = vec!["12345678901234567".to_string(), "23456789012345678".to_string()];
+        let ids = vec![
+            "12345678901234567".to_string(),
+            "23456789012345678".to_string(),
+        ];
         assert_eq!(
             render_notification_message("{mentions} accepted for {mentions}", &ids),
             "<@12345678901234567> <@23456789012345678> accepted for <@12345678901234567> <@23456789012345678>"
         );
-        assert_eq!(render_notification_message("no placeholder", &ids), "no placeholder");
+        assert_eq!(
+            render_notification_message("no placeholder", &ids),
+            "no placeholder"
+        );
     }
 }
