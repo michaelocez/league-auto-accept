@@ -3408,6 +3408,7 @@ dependencies = [
  "raw-window-handle",
  "rcgen",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha1",
