@@ -1,15 +1,19 @@
-//! League Auto Accept (Rust + GPUI) — Phase 1 architecture spike entry point.
+//! League Auto Accept (Rust + GPUI) entry point.
 //!
-//! Proves: GPUI window, always-present tray, minimize-to-tray, single-instance, and the
-//! background-async-service <-> UI bridge. No League service, settings system or Discord yet.
+//! Wires the always-present tray, the single-instance guard, the headless League service and the
+//! typed settings store to the GPUI window. The UI only observes application state and emits
+//! intents; it owns no credentials or networking.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
 
 use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
 
 use league_auto_accept::app::events::{AppEvent, EventOutcome};
-use league_auto_accept::config::settings::AppSettings;
+use league_auto_accept::app::service::spawn_league_service;
+use league_auto_accept::config::store::{default_settings_directory, SettingsStore};
 use league_auto_accept::platform::{single_instance, tray, window as platform_window};
 use league_auto_accept::ui::dashboard::Dashboard;
 
@@ -23,6 +27,15 @@ fn main() {
         return;
     };
 
+    // Typed settings service (own persistence format; encrypted webhook secret).
+    let store = Rc::new(RefCell::new(SettingsStore::with_directory(
+        &default_settings_directory(),
+    )));
+    let settings = store.borrow_mut().load().unwrap_or_else(|error| {
+        log::error!("failed to load settings, using defaults: {error}");
+        Default::default()
+    });
+
     let (tx, rx) = async_channel::unbounded::<AppEvent>();
 
     let show_tx = tx.clone();
@@ -30,17 +43,14 @@ fn main() {
         let _ = show_tx.try_send(AppEvent::Tray(tray::TrayCommand::ShowWindow));
     });
 
-    // Spike C: background async service on its own thread + tokio runtime.
-    league_auto_accept::app::service::spawn_stub_backend(tx.clone());
-    // Spike B: always-present tray on its own thread + message loop.
+    // Headless League service + tray on their own threads.
+    let enabled_flag = spawn_league_service(tx.clone(), settings.auto_accept_enabled);
     tray::spawn(tx.clone());
 
-    let settings = AppSettings::default();
-
     Application::new().run(move |cx: &mut App| {
-        let view = cx.new(|cx| Dashboard::new(settings, cx));
+        let view = cx.new(|cx| Dashboard::new(settings, store.clone(), enabled_flag.clone(), cx));
 
-        let bounds = Bounds::centered(None, size(px(600.0), px(440.0)), cx);
+        let bounds = Bounds::centered(None, size(px(620.0), px(560.0)), cx);
         let window_handle = cx
             .open_window(
                 WindowOptions {

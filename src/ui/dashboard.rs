@@ -1,26 +1,42 @@
-//! Main window — Phase 1 spike dashboard.
+//! Main window: a compact status + control surface for Auto Accept.
 //!
-//! Demonstrates the GPUI <-> state <-> backend bridge: the view renders `AppState`, drains
-//! events already applied by the bridge, and emits user intents by mutating state directly
-//! (the real app will route intents through an actions layer in Phase 4).
+//! The view renders `AppState` and emits user intents (toggles) that are applied to the settings
+//! store and the shared service enable flag. It contains no networking, credentials or filesystem
+//! logic beyond the typed settings service (AGENTS.md sec.13).
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use gpui::{div, prelude::*, rgb, ClickEvent, Context, FocusHandle, IntoElement, Render, Window};
+use serde_json::json;
 
 use crate::app::events::{AppEvent, EventOutcome};
-use crate::app::state::{AppState, ConnectionStatus};
+use crate::app::state::{ActivityKind, AppState};
 use crate::config::settings::AppSettings;
+use crate::config::store::SettingsStore;
 use crate::platform::tray::TrayCommand;
 use crate::ui::theme;
 
 pub struct Dashboard {
     pub state: AppState,
+    store: Rc<RefCell<SettingsStore>>,
+    enabled_flag: Arc<AtomicBool>,
     focus_handle: FocusHandle,
 }
 
 impl Dashboard {
-    pub fn new(settings: AppSettings, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        settings: AppSettings,
+        store: Rc<RefCell<SettingsStore>>,
+        enabled_flag: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             state: AppState::new(settings),
+            store,
+            enabled_flag,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -29,31 +45,33 @@ impl Dashboard {
         &self.state
     }
 
-    /// Applies a backend/tray event. Pure state transition; returns what the shell should do.
+    /// Persists a settings patch through the typed store and mirrors the result into state.
+    fn persist(&mut self, patch: serde_json::Value) {
+        match self.store.borrow_mut().update(&patch) {
+            Ok(updated) => self.state.settings = updated,
+            Err(error) => log::error!("failed to persist settings: {error}"),
+        }
+    }
+
     pub fn apply_event(&mut self, event: AppEvent) -> EventOutcome {
         match event {
             AppEvent::Tray(TrayCommand::ShowWindow) => return EventOutcome::ShowWindow,
             AppEvent::Tray(TrayCommand::Quit) => return EventOutcome::Quit,
             AppEvent::Tray(TrayCommand::ToggleAutoAccept) => {
-                self.state.settings.auto_accept_enabled = !self.state.settings.auto_accept_enabled;
-                log::info!(
-                    "auto accept toggled from tray -> {}",
-                    self.state.settings.auto_accept_enabled
-                );
+                let next = !self.state.settings.auto_accept_enabled;
+                self.set_auto_accept(next);
             }
-            AppEvent::BackendTick { uptime_secs } => {
-                self.state.backend_uptime_secs = uptime_secs;
-            }
-            AppEvent::Connection { connected, message } => {
-                self.state.connection = if connected {
-                    ConnectionStatus::Connected
-                } else {
-                    ConnectionStatus::Disconnected
-                };
-                self.state.connection_message = message;
+            AppEvent::Service(service_event) => {
+                self.state.apply_service_event(&service_event);
             }
         }
         EventOutcome::Continue
+    }
+
+    fn set_auto_accept(&mut self, enabled: bool) {
+        self.state.settings.auto_accept_enabled = enabled;
+        self.enabled_flag.store(enabled, Ordering::Relaxed);
+        self.persist(json!({ "autoAcceptEnabled": enabled }));
     }
 }
 
@@ -63,6 +81,14 @@ fn status_color(summary: &str) -> gpui::Rgba {
         "Connecting" => theme::warning(),
         "League offline" => theme::danger(),
         _ => theme::text_secondary(),
+    }
+}
+
+fn activity_color(kind: ActivityKind) -> gpui::Rgba {
+    match kind {
+        ActivityKind::Info => theme::text_secondary(),
+        ActivityKind::Accepted => theme::success(),
+        ActivityKind::Warning => theme::danger(),
     }
 }
 
@@ -129,11 +155,45 @@ impl Render for Dashboard {
         let pill_color = status_color(summary);
         let auto_accept = self.state.settings.auto_accept_enabled;
         let minimize = self.state.settings.minimize_to_tray;
-        let connection_message = format!("{} - {}", self.state.connection_message, summary);
-        let backend_line = format!(
-            "Backend service heartbeat: {}s (background async service -> channel -> GPUI)",
-            self.state.backend_uptime_secs
-        );
+        let connection_message = self.state.connection_message.clone();
+        let ready_message = self.state.ready_check_message.clone();
+        let monitoring = self.state.monitoring();
+
+        let activity: Vec<gpui::AnyElement> = if self.state.activity.is_empty() {
+            vec![div()
+                .px_4()
+                .py_3()
+                .text_sm()
+                .text_color(theme::text_secondary())
+                .child("No activity yet.")
+                .into_any_element()]
+        } else {
+            self.state
+                .activity
+                .iter()
+                .map(|item| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_4()
+                        .py_2()
+                        .child(
+                            div()
+                                .size(gpui::px(6.0))
+                                .rounded_full()
+                                .bg(activity_color(item.kind)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme::text_primary())
+                                .child(item.label.clone()),
+                        )
+                        .into_any_element()
+                })
+                .collect()
+        };
 
         div()
             .flex()
@@ -158,7 +218,7 @@ impl Render for Dashboard {
                                 div()
                                     .text_sm()
                                     .text_color(theme::text_secondary())
-                                    .child("Rust + GPUI architecture spike"),
+                                    .child("Ready-check automation"),
                             ),
                     )
                     .child(
@@ -184,21 +244,15 @@ impl Render for Dashboard {
             .child(Self::toggle_card(
                 "toggle-auto-accept",
                 "Auto Accept",
-                "Tray can toggle this; window reflects it immediately.",
+                if monitoring {
+                    "Monitoring ready checks."
+                } else {
+                    "Accepts one ready check per queue."
+                },
                 auto_accept,
                 cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                    this.state.settings.auto_accept_enabled =
-                        !this.state.settings.auto_accept_enabled;
-                    cx.notify();
-                }),
-            ))
-            .child(Self::toggle_card(
-                "toggle-minimize",
-                "Minimize to tray",
-                "On: closing hides to tray. Off: closing exits (tray stays present).",
-                minimize,
-                cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                    this.state.settings.minimize_to_tray = !this.state.settings.minimize_to_tray;
+                    let next = !this.state.settings.auto_accept_enabled;
+                    this.set_auto_accept(next);
                     cx.notify();
                 }),
             ))
@@ -212,7 +266,38 @@ impl Render for Dashboard {
                     .rounded_lg()
                     .text_sm()
                     .text_color(theme::text_secondary())
-                    .child(backend_line),
+                    .child(ready_message),
+            )
+            .child(Self::toggle_card(
+                "toggle-minimize",
+                "Minimize to tray",
+                "On: closing hides to tray. Off: closing exits (tray stays present).",
+                minimize,
+                cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                    let next = !this.state.settings.minimize_to_tray;
+                    this.state.settings.minimize_to_tray = next;
+                    this.persist(json!({ "minimizeToTray": next }));
+                    cx.notify();
+                }),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .border_1()
+                    .border_color(theme::border())
+                    .rounded_lg()
+                    .bg(theme::surface())
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_3()
+                            .pb_1()
+                            .text_sm()
+                            .text_color(theme::text_secondary())
+                            .child("Recent activity"),
+                    )
+                    .children(activity),
             )
             .child(
                 div().flex().justify_end().child(

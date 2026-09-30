@@ -1,3 +1,4 @@
+use crate::league::service::ServiceEvent;
 use crate::platform::tray::TrayCommand;
 
 /// Events delivered from background threads (tray, async service, future LCU service) to the UI.
@@ -7,15 +8,8 @@ use crate::platform::tray::TrayCommand;
 #[derive(Clone, Debug)]
 pub enum AppEvent {
     Tray(TrayCommand),
-    /// Heartbeat from the background async service (Spike C).
-    BackendTick {
-        uptime_secs: u64,
-    },
-    /// Connection state change (stub in Phase 1).
-    Connection {
-        connected: bool,
-        message: String,
-    },
+    /// An event from the headless League service (connection / ready check / lifecycle).
+    Service(ServiceEvent),
 }
 
 /// What the UI should do after applying an event.

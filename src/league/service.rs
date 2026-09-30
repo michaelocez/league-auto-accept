@@ -8,6 +8,7 @@
 //! Behaviour preserved: 3-second discovery/reconnect polling, credential-change detection,
 //! one accept request at a time, bounded retry, cancellation, and generation-guarded staleness.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,7 @@ enum MachineInput {
 pub struct LeagueService {
     locator: ClientLocator,
     machine: ReadyCheckMachine,
+    enabled: Arc<AtomicBool>,
     tx: async_channel::Sender<ServiceEvent>,
 }
 
@@ -42,11 +44,27 @@ impl LeagueService {
         enabled: bool,
         tx: async_channel::Sender<ServiceEvent>,
     ) -> Self {
+        Self::with_enabled_flag(locator, Arc::new(AtomicBool::new(enabled)), tx)
+    }
+
+    /// Builds a service whose Auto Accept enable state can be changed at runtime via the shared
+    /// flag (used by the UI/tray to drive the running service).
+    pub fn with_enabled_flag(
+        locator: ClientLocator,
+        enabled: Arc<AtomicBool>,
+        tx: async_channel::Sender<ServiceEvent>,
+    ) -> Self {
+        let initial = enabled.load(Ordering::Relaxed);
         Self {
             locator,
-            machine: ReadyCheckMachine::new(enabled),
+            machine: ReadyCheckMachine::new(initial),
+            enabled,
             tx,
         }
+    }
+
+    pub fn enabled_flag(&self) -> Arc<AtomicBool> {
+        self.enabled.clone()
     }
 
     pub fn machine_mut(&mut self) -> &mut ReadyCheckMachine {
@@ -143,6 +161,7 @@ impl LeagueService {
                     }
                 }
                 _ = poll.tick() => {
+                    self.sync_enabled(Some(&rest), Some(&input_tx));
                     match self.locator.find_running_client() {
                         None => {
                             self.emit(ServiceEvent::Connection {
@@ -188,6 +207,19 @@ impl LeagueService {
                 let effects = self.machine.on_ready_check(state, player_response);
                 self.handle_effects(effects, Some(rest), Some(input_tx));
             }
+        }
+    }
+
+    /// Applies a runtime Auto Accept enable change to the state machine.
+    fn sync_enabled(
+        &mut self,
+        rest: Option<&Arc<LcuRestClient>>,
+        input_tx: Option<&async_channel::Sender<MachineInput>>,
+    ) {
+        let wanted = self.enabled.load(Ordering::Relaxed);
+        if wanted != self.machine.enabled() {
+            let effects = self.machine.set_enabled(wanted);
+            self.handle_effects(effects, rest, input_tx);
         }
     }
 
