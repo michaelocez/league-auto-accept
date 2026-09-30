@@ -147,10 +147,14 @@ impl Dashboard {
         checked: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
     ) -> impl IntoElement {
-        let (track, knob) = if checked {
-            (theme::accent(), theme::text_primary())
+        let (track, knob_bg, border) = if checked {
+            (theme::accent(), theme::text_primary(), theme::accent())
         } else {
-            (theme::surface_raised(), theme::text_secondary())
+            (
+                theme::surface_raised(),
+                theme::text_muted(),
+                theme::border_strong(),
+            )
         };
         div()
             .id(id)
@@ -159,13 +163,17 @@ impl Dashboard {
             .justify_between()
             .gap_4()
             .px_4()
-            .py_3()
+            .py_4()
             .bg(theme::surface())
             .border_1()
             .border_color(theme::border())
             .rounded_lg()
             .cursor_pointer()
-            .hover(|style| style.bg(theme::surface_raised()))
+            .hover(|style| {
+                style
+                    .bg(theme::surface_raised())
+                    .border_color(theme::border_strong())
+            })
             .on_click(on_click)
             .child(
                 div()
@@ -184,14 +192,15 @@ impl Dashboard {
                 div()
                     .flex()
                     .items_center()
-                    .w(gpui::px(38.0))
-                    .h(gpui::px(21.0))
-                    .px(gpui::px(3.0))
+                    .when(checked, |style| style.justify_end())
+                    .w(gpui::px(44.0))
+                    .h(gpui::px(24.0))
+                    .px(gpui::px(4.0))
                     .bg(track)
                     .border_1()
-                    .border_color(theme::border())
+                    .border_color(border)
                     .rounded_full()
-                    .child(div().size(gpui::px(13.0)).bg(knob).rounded_full()),
+                    .child(div().size(gpui::px(15.0)).bg(knob_bg).rounded_full()),
             )
     }
 

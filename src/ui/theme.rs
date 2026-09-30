@@ -9,22 +9,27 @@ use gpui::{px, Pixels, Rgba};
 // --- Colour roles ---------------------------------------------------------------------------
 
 pub fn background() -> Rgba {
-    gpui::rgb(0x0b0c0e)
+    gpui::rgb(0x08090b)
 }
 
-/// Primary card/section surface.
+/// Primary card/section surface (clearly lifted from the window background).
 pub fn surface() -> Rgba {
-    gpui::rgb(0x131417)
+    gpui::rgb(0x16181d)
 }
 
 /// Slightly raised surface for hover and nested cards.
 pub fn surface_raised() -> Rgba {
-    gpui::rgb(0x191b1f)
+    gpui::rgb(0x1f2229)
 }
 
 /// Hairline border.
 pub fn border() -> Rgba {
-    gpui::rgb(0x26282e)
+    gpui::rgb(0x2c303a)
+}
+
+/// Stronger border for focus/emphasis.
+pub fn border_strong() -> Rgba {
+    gpui::rgb(0x3a3f4b)
 }
 
 pub fn border_focus() -> Rgba {
