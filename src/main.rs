@@ -9,14 +9,19 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use gpui::{prelude::*, px, size, App, Bounds, TitlebarOptions, WindowBounds, WindowOptions};
+use gpui::{
+    point, prelude::*, px, size, App, Bounds, TitlebarOptions, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions,
+};
 
 use league_auto_accept::app::events::{AppEvent, EventOutcome};
 use league_auto_accept::app::service::spawn_league_service;
 use league_auto_accept::config::store::{default_settings_directory, SettingsStore};
+use league_auto_accept::platform::tray::TrayCommand;
 use league_auto_accept::platform::{single_instance, tray, window as platform_window};
 use league_auto_accept::ui::dashboard::Dashboard;
 use league_auto_accept::ui::theme::{self, Appearance};
+use league_auto_accept::ui::tray_popup::TrayPopup;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -56,6 +61,9 @@ fn main() {
     let enabled_flag = background.enabled_flag.clone();
     let notifications = background.notifications.clone();
     tray::spawn(tx.clone());
+
+    // The tray popup sends its intents through the same channel as the tray.
+    let ui_tx = tx.clone();
 
     gpui::application().run(move |cx: &mut App| {
         gpui::init(cx);
@@ -140,7 +148,21 @@ fn main() {
         // Bridge: drain backend/tray events on the GPUI foreground executor and update state.
         let hwnd_slot = hwnd_slot.clone();
         cx.spawn(async move |cx| {
-            while let Ok(event) = rx.recv().await {
+            let mut popup: Option<WindowHandle<TrayPopup>> = None;
+            loop {
+                let Ok(event) = rx.recv().await else {
+                    break;
+                };
+                // The tray popup is a separate window owned by the shell, not app state.
+                if matches!(&event, AppEvent::Tray(TrayCommand::OpenPopup)) {
+                    cx.update(|app| {
+                        if let Some(handle) = popup {
+                            let _ = handle.update(app, |_view, window, _cx| window.remove_window());
+                        }
+                        popup = open_tray_popup(app, view.clone(), ui_tx.clone());
+                    });
+                    continue;
+                }
                 let outcome = cx.update(|app| {
                     view.update(app, |dashboard, cx| {
                         let outcome = dashboard.apply_event(event);
@@ -165,4 +187,47 @@ fn main() {
         })
         .detach();
     });
+}
+
+/// Opens the custom tray popup anchored to the bottom-right of the primary display's work area
+/// (just above the tray). Recreated per invocation; it dismisses itself on focus loss.
+fn open_tray_popup(
+    app: &mut App,
+    dashboard: gpui::Entity<Dashboard>,
+    tx: async_channel::Sender<AppEvent>,
+) -> Option<WindowHandle<TrayPopup>> {
+    let area = app
+        .primary_display()
+        .map(|display| display.visible_bounds())
+        .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0))));
+    let width = px(300.0);
+    let height = px(252.0);
+    let margin = px(8.0);
+    let origin = point(
+        area.origin.x + area.size.width - width - margin,
+        area.origin.y + area.size.height - height - margin,
+    );
+    let bounds = Bounds::new(origin, size(width, height));
+
+    match app.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            kind: WindowKind::PopUp,
+            focus: true,
+            show: true,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            window_background: WindowBackgroundAppearance::Opaque,
+            ..Default::default()
+        },
+        move |window, cx| cx.new(|cx| TrayPopup::new(dashboard, tx, window, cx)),
+    ) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            log::error!("failed to open tray popup: {error}");
+            None
+        }
+    }
 }

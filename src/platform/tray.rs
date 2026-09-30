@@ -16,6 +16,8 @@ use crate::app::events::AppEvent;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
     ShowWindow,
+    /// Open (or refresh) the custom GPUI tray popup near the icon.
+    OpenPopup,
     ToggleAutoAccept,
     Quit,
 }
@@ -78,6 +80,7 @@ fn run(tx: async_channel::Sender<AppEvent>) -> Result<(), String> {
         }
     }));
 
+    // Left-click opens our custom popup; right-click still shows the native menu (system fallback).
     let click_tx = tx.clone();
     TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
         if let TrayIconEvent::Click {
@@ -86,12 +89,13 @@ fn run(tx: async_channel::Sender<AppEvent>) -> Result<(), String> {
             ..
         } = event
         {
-            let _ = click_tx.try_send(AppEvent::Tray(TrayCommand::ShowWindow));
+            let _ = click_tx.try_send(AppEvent::Tray(TrayCommand::OpenPopup));
         }
     }));
 
     let _tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
         .with_tooltip("League Auto Accept")
         .with_icon(icon)
         .build()

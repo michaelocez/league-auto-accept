@@ -58,7 +58,7 @@ impl Default for TitleBar {
     }
 }
 
-fn app_mark(t: &Theme) -> impl IntoElement {
+pub(crate) fn app_mark(t: &Theme) -> impl IntoElement {
     div()
         .flex()
         .items_center()

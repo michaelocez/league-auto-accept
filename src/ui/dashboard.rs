@@ -119,6 +119,8 @@ impl Dashboard {
         match event {
             AppEvent::Tray(TrayCommand::ShowWindow) => return EventOutcome::ShowWindow,
             AppEvent::Tray(TrayCommand::Quit) => return EventOutcome::Quit,
+            // Handled by the shell (opens the tray popup window); nothing to apply here.
+            AppEvent::Tray(TrayCommand::OpenPopup) => {}
             AppEvent::Tray(TrayCommand::ToggleAutoAccept) => {
                 let next = !self.state.settings.auto_accept_enabled;
                 self.set_auto_accept(next);
@@ -139,7 +141,7 @@ impl Dashboard {
     }
 }
 
-fn status_color(summary: &str) -> Rgba {
+pub(crate) fn status_color(summary: &str) -> Rgba {
     match summary {
         "Active" => theme::success(),
         "Connecting" => theme::warning(),
