@@ -1,4 +1,4 @@
-use crate::config::settings::Settings;
+use crate::config::settings::AppSettings;
 
 /// LCU connection status. Mirrors the Electron `ConnectionStatus` contract.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,7 +48,7 @@ impl ReadyCheckStatus {
 /// reconnect state, ...) arrives with the League service in Phase 2.
 #[derive(Clone, Debug)]
 pub struct AppState {
-    pub settings: Settings,
+    pub settings: AppSettings,
     pub connection: ConnectionStatus,
     pub connection_message: String,
     pub ready_check: ReadyCheckStatus,
@@ -58,7 +58,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(settings: Settings) -> Self {
+    pub fn new(settings: AppSettings) -> Self {
         Self {
             settings,
             connection: ConnectionStatus::Connecting,
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn never_reports_active_unless_enabled_and_connected() {
-        let mut state = AppState::new(Settings::default());
+        let mut state = AppState::new(AppSettings::default());
 
         state.connection = ConnectionStatus::Connected;
         assert_eq!(state.summary(), "Disabled");

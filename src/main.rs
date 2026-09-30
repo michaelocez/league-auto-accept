@@ -9,7 +9,7 @@ use std::sync::Arc;
 use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
 
 use league_auto_accept::app::events::{AppEvent, EventOutcome};
-use league_auto_accept::config::settings::Settings;
+use league_auto_accept::config::settings::AppSettings;
 use league_auto_accept::platform::{single_instance, tray, window as platform_window};
 use league_auto_accept::ui::dashboard::Dashboard;
 
@@ -35,7 +35,7 @@ fn main() {
     // Spike B: always-present tray on its own thread + message loop.
     tray::spawn(tx.clone());
 
-    let settings = Settings::default();
+    let settings = AppSettings::default();
 
     Application::new().run(move |cx: &mut App| {
         let view = cx.new(|cx| Dashboard::new(settings, cx));

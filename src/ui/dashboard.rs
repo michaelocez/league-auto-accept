@@ -8,7 +8,7 @@ use gpui::{div, prelude::*, rgb, ClickEvent, Context, FocusHandle, IntoElement, 
 
 use crate::app::events::{AppEvent, EventOutcome};
 use crate::app::state::{AppState, ConnectionStatus};
-use crate::config::settings::Settings;
+use crate::config::settings::AppSettings;
 use crate::platform::tray::TrayCommand;
 use crate::ui::theme;
 
@@ -18,7 +18,7 @@ pub struct Dashboard {
 }
 
 impl Dashboard {
-    pub fn new(settings: Settings, cx: &mut Context<Self>) -> Self {
+    pub fn new(settings: AppSettings, cx: &mut Context<Self>) -> Self {
         Self {
             state: AppState::new(settings),
             focus_handle: cx.focus_handle(),
