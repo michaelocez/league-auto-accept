@@ -11,7 +11,8 @@ use std::sync::{Arc, RwLock};
 use gpui::base::input::{Input, InputEvent, InputState};
 use gpui::prelude::*;
 use gpui::{
-    div, ClickEvent, Context, Entity, FocusHandle, IntoElement, Render, Rgba, Subscription, Window,
+    div, px, ClickEvent, Context, Entity, FocusHandle, IntoElement, Render, Rgba, Subscription,
+    Window,
 };
 use serde_json::json;
 
@@ -23,15 +24,10 @@ use crate::config::store::SettingsStore;
 use crate::notifications::discord::parse_discord_webhook_url;
 use crate::platform::tray::TrayCommand;
 use crate::ui::components::{
-    Button, ButtonVariant, Divider, Elevation, LabeledField, StatusPill, Surface, Toggle,
+    Button, ButtonVariant, Divider, Elevation, LabeledField, Surface, Toggle,
 };
-use crate::ui::theme;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Screen {
-    Dashboard,
-    Settings,
-}
+use crate::ui::shell::{PageHeader, Screen, Sidebar, TitleBar};
+use crate::ui::theme::{self, Theme};
 
 /// Which setting a toggle row switch controls.
 #[derive(Clone, Copy)]
@@ -200,35 +196,6 @@ impl Dashboard {
                     },
                 ))),
         )
-    }
-
-    fn nav_pill(
-        id: &'static str,
-        label: &'static str,
-        active: bool,
-        cx: &mut Context<Self>,
-        screen: Screen,
-    ) -> impl IntoElement {
-        let (background, foreground) = if active {
-            (theme::surface_raised(), theme::text_primary())
-        } else {
-            (theme::surface(), theme::text_secondary())
-        };
-        div()
-            .id(id)
-            .px_3()
-            .py_1()
-            .bg(background)
-            .border_1()
-            .border_color(theme::border())
-            .rounded_full()
-            .cursor_pointer()
-            .hover(|style| style.text_color(theme::text_primary()))
-            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                this.screen = screen;
-                cx.notify();
-            }))
-            .child(div().text_sm().text_color(foreground).child(label))
     }
 
     fn render_dashboard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -445,63 +412,74 @@ impl Dashboard {
 
 impl Render for Dashboard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = theme::current();
+        let t = Theme::of(cx);
         let summary = self.state.summary();
-        let pill_color = status_color(summary);
         let screen = self.screen;
+
         let body = match screen {
             Screen::Dashboard => self.render_dashboard(cx),
             Screen::Settings => self.render_settings(cx),
         };
 
+        let nav_view = cx.entity();
+        let theme_view = cx.entity();
+
+        let sidebar = Sidebar::new(
+            screen,
+            summary,
+            status_color(summary),
+            self.state.connection.label(),
+            move |target, _event, _window, app| {
+                nav_view.update(app, |this, cx| {
+                    this.screen = target;
+                    cx.notify();
+                });
+            },
+        );
+
+        let header = match screen {
+            Screen::Dashboard => PageHeader::new("Dashboard").subtitle("Ready-check automation"),
+            Screen::Settings => {
+                PageHeader::new("Settings").subtitle("Notifications and preferences")
+            }
+        };
+
+        let title_bar = TitleBar::new(appearance, move |_event, _window, app| {
+            let next = theme::current().toggled();
+            theme::set_appearance(app, next);
+            theme_view.update(app, |_this, cx| cx.notify());
+        });
+
         div()
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme::background())
-            .text_color(theme::text_primary())
-            .p_6()
-            .gap_4()
+            .bg(t.bg)
+            .text_color(t.text)
+            .child(title_bar)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_xl().child("League Auto Accept"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme::text_secondary())
-                                    .child("Ready-check automation"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(Self::nav_pill(
-                                "nav-dashboard",
-                                "Dashboard",
-                                screen == Screen::Dashboard,
-                                cx,
-                                Screen::Dashboard,
-                            ))
-                            .child(Self::nav_pill(
-                                "nav-settings",
-                                "Settings",
-                                screen == Screen::Settings,
-                                cx,
-                                Screen::Settings,
-                            ))
-                            .child(StatusPill::new(summary, pill_color)),
-                    ),
+                div().flex().flex_1().min_h(px(0.0)).child(sidebar).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(header)
+                        .child(
+                            div()
+                                .id("content-scroll")
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_h(px(0.0))
+                                .overflow_y_scroll()
+                                .px(theme::space_8())
+                                .pb(theme::space_8())
+                                .child(body),
+                        ),
+                ),
             )
-            .child(body)
             .track_focus(&self.focus_handle)
     }
 }

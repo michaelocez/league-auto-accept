@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use gpui::{prelude::*, px, size, App, Bounds, WindowBounds, WindowOptions};
+use gpui::{prelude::*, px, size, App, Bounds, TitlebarOptions, WindowBounds, WindowOptions};
 
 use league_auto_accept::app::events::{AppEvent, EventOutcome};
 use league_auto_accept::app::service::spawn_league_service;
@@ -73,10 +73,17 @@ fn main() {
             let settings_shared = settings_shared.clone();
             let notifications = notifications.clone();
             let settings = settings.clone();
-            let bounds = Bounds::centered(None, size(px(620.0), px(560.0)), cx);
+            let bounds = Bounds::centered(None, size(px(880.0), px(600.0)), cx);
             let (_handle, view) = gpui::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(720.0), px(520.0))),
+                    // Custom-drawn title bar: hide the OS chrome and draw our own in `shell.rs`.
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("League Auto Accept".into()),
+                        appears_transparent: true,
+                        traffic_light_position: None,
+                    }),
                     ..Default::default()
                 },
                 cx,
