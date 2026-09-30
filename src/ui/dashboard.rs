@@ -19,22 +19,23 @@ use serde_json::json;
 use crate::app::events::{AppEvent, EventOutcome};
 use crate::app::service::NotificationCommand;
 use crate::app::state::{ActivityKind, AppState};
-use crate::config::settings::AppSettings;
+use crate::config::settings::{
+    is_valid_discord_id, AppSettings, DiscordMention, MAX_DISCORD_USER_IDS,
+};
 use crate::config::store::SettingsStore;
 use crate::notifications::discord::parse_discord_webhook_url;
 use crate::platform::tray::TrayCommand;
 use crate::ui::components::{
-    Button, ButtonVariant, Divider, Elevation, LabeledField, Surface, Toggle,
+    Button, ButtonVariant, Divider, Elevation, LabeledField, Section, Surface, Toggle,
 };
 use crate::ui::shell::{PageHeader, Screen, Sidebar, TitleBar};
-use crate::ui::theme::{self, Theme};
+use crate::ui::theme::{self, Appearance, Theme};
 
-/// Which setting a toggle row switch controls.
+/// Which boolean setting a toggle row switch controls.
 #[derive(Clone, Copy)]
-enum ToggleAction {
-    AutoAccept,
+enum ToggleSetting {
+    DiscordNotifications,
     MinimizeToTray,
-    Discord,
 }
 
 pub struct Dashboard {
@@ -45,6 +46,9 @@ pub struct Dashboard {
     notifications: async_channel::Sender<NotificationCommand>,
     webhook: Entity<InputState>,
     webhook_draft: String,
+    mention_nickname: Entity<InputState>,
+    mention_id: Entity<InputState>,
+    mention_error: Option<String>,
     #[allow(dead_code)]
     subscriptions: Vec<Subscription>,
     screen: Screen,
@@ -75,6 +79,9 @@ impl Dashboard {
                 }
             },
         );
+        let mention_nickname =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Nickname (optional)"));
+        let mention_id = cx.new(|cx| InputState::new(window, cx).placeholder("Discord user ID"));
         Self {
             state: AppState::new(settings),
             store,
@@ -83,8 +90,11 @@ impl Dashboard {
             notifications,
             webhook,
             webhook_draft,
+            mention_nickname,
+            mention_id,
+            mention_error: None,
             subscriptions: vec![subscription],
-            screen: Screen::Dashboard,
+            screen: Screen::AutoAccept,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -147,169 +157,213 @@ fn activity_color(kind: ActivityKind) -> Rgba {
 }
 
 impl Dashboard {
-    /// A titled row with a switch on the right — the shared shape of an automation setting.
+    /// A titled row with a switch on the right — the shared shape of a boolean setting. Rendered
+    /// without its own border so it can sit inside a grouped section surface.
     fn toggle_row(
         id: &'static str,
         title: &'static str,
         subtitle: &'static str,
         checked: bool,
-        action: ToggleAction,
+        setting: ToggleSetting,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        Surface::new().elevation(Elevation::Raised).child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(theme::space_4())
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(theme::space_1())
-                        .text_size(theme::text_body())
-                        .child(div().text_color(theme::text_primary()).child(title))
-                        .child(
+        let (title, subtitle) = (title.to_string(), subtitle.to_string());
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(theme::space_4())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme::space_1())
+                    .text_size(theme::text_body())
+                    .child(div().text_color(theme::text_primary()).child(title))
+                    .when(!subtitle.is_empty(), |this| {
+                        this.child(
                             div()
                                 .text_size(theme::text_small())
                                 .text_color(theme::text_secondary())
                                 .child(subtitle),
-                        ),
-                )
-                .child(Toggle::new(id).checked(checked).on_change(cx.listener(
-                    move |this, _event: &ClickEvent, _window, cx| {
-                        match action {
-                            ToggleAction::AutoAccept => {
-                                let next = !this.state.settings.auto_accept_enabled;
-                                this.set_auto_accept(next);
-                            }
-                            ToggleAction::MinimizeToTray => {
-                                let next = !this.state.settings.minimize_to_tray;
-                                this.persist(json!({ "minimizeToTray": next }));
-                            }
-                            ToggleAction::Discord => {
-                                let next = !this.state.settings.discord_notifications_enabled;
-                                this.persist(json!({ "discordNotificationsEnabled": next }));
-                            }
+                        )
+                    }),
+            )
+            .child(Toggle::new(id).checked(checked).on_change(cx.listener(
+                move |this, _event: &ClickEvent, _window, cx| {
+                    match setting {
+                        ToggleSetting::DiscordNotifications => {
+                            let next = !this.state.settings.discord_notifications_enabled;
+                            this.persist(json!({ "discordNotificationsEnabled": next }));
                         }
-                        cx.notify();
-                    },
-                ))),
-        )
+                        ToggleSetting::MinimizeToTray => {
+                            let next = !this.state.settings.minimize_to_tray;
+                            this.persist(json!({ "minimizeToTray": next }));
+                        }
+                    }
+                    cx.notify();
+                },
+            )))
     }
 
     fn render_dashboard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = Theme::of(cx);
         let auto_accept = self.state.settings.auto_accept_enabled;
-        let minimize = self.state.settings.minimize_to_tray;
-        let connection_message = self.state.connection_message.clone();
         let ready_message = self.state.ready_check_message.clone();
-        let monitoring = self.state.monitoring();
+        let summary = self.state.summary();
 
-        let activity: Vec<gpui::AnyElement> = if self.state.activity.is_empty() {
-            vec![div()
-                .px_4()
-                .py_3()
-                .text_sm()
-                .text_color(theme::text_secondary())
-                .child("No activity yet.")
-                .into_any_element()]
+        let (state_color, hero_bg) = match summary {
+            "Active" => (t.success, t.accent_subtle),
+            "Connecting" => (t.warning, t.bg_elevated),
+            "League offline" => (t.danger, t.bg_elevated),
+            _ => (t.text_faint, t.bg_elevated),
+        };
+        let hero_detail = if !auto_accept {
+            "Auto Accept is off. Turn it on to monitor ready checks.".to_string()
         } else {
-            self.state
-                .activity
-                .iter()
-                .map(|item| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_4()
-                        .py_2()
-                        .child(
-                            div()
-                                .size(gpui::px(6.0))
-                                .rounded_full()
-                                .bg(activity_color(item.kind)),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme::text_primary())
-                                .child(item.label.clone()),
-                        )
-                        .into_any_element()
-                })
-                .collect()
+            ready_message
         };
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme::text_secondary())
-                    .child(connection_message),
-            )
-            .child(Self::toggle_row(
-                "toggle-auto-accept",
-                "Auto Accept",
-                if monitoring {
-                    "Monitoring ready checks."
-                } else {
-                    "Accepts one ready check per queue."
-                },
-                auto_accept,
-                ToggleAction::AutoAccept,
-                cx,
-            ))
-            .child(
-                Surface::new().elevation(Elevation::Base).child(
+        let hero = Surface::new().background(hero_bg).child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(theme::space_6())
+                .child(
                     div()
-                        .text_size(theme::text_small())
-                        .text_color(theme::text_secondary())
-                        .child(ready_message),
+                        .flex()
+                        .flex_col()
+                        .gap(theme::space_2())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(theme::space_3())
+                                .child(div().size(px(10.0)).rounded_full().bg(state_color))
+                                .child(
+                                    div()
+                                        .text_size(theme::text_display())
+                                        .font_weight(theme::weight_semibold())
+                                        .text_color(t.text)
+                                        .child(summary),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(theme::text_small())
+                                .text_color(t.text_muted)
+                                .child(hero_detail),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap(theme::space_2())
+                        .child(
+                            div()
+                                .text_size(theme::text_caption())
+                                .font_weight(theme::weight_medium())
+                                .text_color(t.text_faint)
+                                .child("AUTO ACCEPT"),
+                        )
+                        .child(
+                            Toggle::new("toggle-auto-accept")
+                                .checked(auto_accept)
+                                .on_change(cx.listener(
+                                    move |this, _event: &ClickEvent, _window, cx| {
+                                        let next = !this.state.settings.auto_accept_enabled;
+                                        this.set_auto_accept(next);
+                                        cx.notify();
+                                    },
+                                )),
+                        ),
                 ),
-            )
-            .child(Self::toggle_row(
-                "toggle-minimize",
-                "Minimize to tray",
-                "On: closing hides to tray. Off: closing exits (tray stays present).",
-                minimize,
-                ToggleAction::MinimizeToTray,
-                cx,
-            ))
-            .child(
-                Surface::new()
-                    .elevation(Elevation::Base)
-                    .padded(false)
+        );
+
+        let mut body = div().flex().flex_col().gap(theme::space_5()).child(hero);
+        // Only show the timeline once there is something real to show — an empty placeholder adds
+        // noise without information.
+        if !self.state.activity.is_empty() {
+            body = body.child(self.render_activity_timeline(&t));
+        }
+        body.into_any_element()
+    }
+
+    fn render_activity_timeline(&self, t: &Theme) -> gpui::AnyElement {
+        let clear = Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        };
+        let last = self.state.activity.len() - 1;
+        let items: Vec<gpui::AnyElement> = self
+            .state
+            .activity
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let top = if index == 0 { clear } else { t.border };
+                let bottom = if index == last { clear } else { t.border };
+                div()
+                    .flex()
+                    .gap(theme::space_3())
+                    .min_h(px(32.0))
                     .child(
                         div()
-                            .px_4()
-                            .pt_3()
-                            .pb_1()
-                            .text_sm()
-                            .text_color(theme::text_secondary())
-                            .child("Recent activity"),
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .w(px(10.0))
+                            .flex_shrink_0()
+                            .child(div().w(px(1.0)).h(px(8.0)).bg(top))
+                            .child(
+                                div()
+                                    .size(px(8.0))
+                                    .rounded_full()
+                                    .bg(activity_color(item.kind)),
+                            )
+                            .child(div().w(px(1.0)).flex_1().bg(bottom)),
                     )
-                    .child(Divider::horizontal())
-                    .children(activity),
-            )
+                    .child(
+                        div()
+                            .pb(theme::space_3())
+                            .text_size(theme::text_body())
+                            .text_color(t.text)
+                            .child(item.label.clone()),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        Surface::new()
+            .elevation(Elevation::Base)
+            .padded(false)
             .child(
-                div().flex().justify_end().child(
-                    Button::new("quit", "Quit")
-                        .variant(ButtonVariant::Primary)
-                        .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
-                            cx.quit();
-                        })),
-                ),
+                div()
+                    .px(theme::space_4())
+                    .py(theme::space_3())
+                    .text_size(theme::text_caption())
+                    .font_weight(theme::weight_medium())
+                    .text_color(t.text_faint)
+                    .child("RECENT ACTIVITY"),
+            )
+            .child(Divider::horizontal())
+            .child(
+                div()
+                    .px(theme::space_4())
+                    .pt(theme::space_3())
+                    .children(items),
             )
             .into_any_element()
     }
 
-    fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_notifications(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = Theme::of(cx);
         let discord_enabled = self.state.settings.discord_notifications_enabled;
-        let mentions = self.state.settings.discord_mentions.len();
         let testing = self.state.webhook_testing;
         let webhook_error = if self.webhook_draft.trim().is_empty() {
             String::new()
@@ -334,7 +388,7 @@ impl Dashboard {
         let webhook_field = if webhook_error.is_empty() {
             LabeledField::new()
                 .label("Discord webhook URL")
-                .helper(format!("People to mention: {mentions}"))
+                .helper("Stored in the privileged backend; never shown to other apps.")
                 .child(Input::new(&self.webhook))
         } else {
             LabeledField::new()
@@ -343,87 +397,308 @@ impl Dashboard {
                 .child(Input::new(&self.webhook))
         };
 
+        let test_row = div()
+            .flex()
+            .items_center()
+            .gap(theme::space_3())
+            .child(
+                Button::new(
+                    "test-webhook",
+                    if testing {
+                        "Sending…"
+                    } else {
+                        "Test Webhook"
+                    },
+                )
+                .variant(ButtonVariant::Secondary)
+                .disabled(testing)
+                .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                    if this.state.webhook_testing {
+                        return;
+                    }
+                    this.state.webhook_test = None;
+                    this.state.webhook_testing = true;
+                    let _ = this
+                        .notifications
+                        .try_send(NotificationCommand::TestWebhook);
+                    cx.notify();
+                })),
+            )
+            .child(
+                div()
+                    .text_size(theme::text_small())
+                    .text_color(test_color)
+                    .child(test_message),
+            );
+
+        Surface::new()
+            .child(
+                Section::new()
+                    .title("Discord")
+                    .subtitle("Webhook alerts. Notifications never delay or control Auto Accept.")
+                    .child(Self::toggle_row(
+                        "toggle-discord",
+                        "Enable Discord notifications",
+                        "Queue popped, auto-accepted and game-started alerts.",
+                        discord_enabled,
+                        ToggleSetting::DiscordNotifications,
+                        cx,
+                    ))
+                    .child(webhook_field)
+                    .child(self.render_mentions(&t, cx))
+                    .child(test_row),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = Theme::of(cx);
+        let minimize = self.state.settings.minimize_to_tray;
+
+        let window = Surface::new().child(Section::new().title("Window").child(Self::toggle_row(
+            "toggle-minimize",
+            "Close to tray",
+            "",
+            minimize,
+            ToggleSetting::MinimizeToTray,
+            cx,
+        )));
+
+        let appearance = theme::current();
+        let theme_button = |id: &'static str,
+                            label: &'static str,
+                            value: Appearance,
+                            cx: &mut Context<Self>,
+                            active: bool| {
+            Button::new(id, label)
+                .variant(if active {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Ghost
+                })
+                .size(crate::ui::components::ButtonSize::Sm)
+                .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
+                    theme::set_appearance(cx, value);
+                    cx.notify();
+                }))
+        };
+        let appearance_section = Surface::new().child(
+            Section::new().title("Appearance").child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(theme::space_4())
+                    .child(
+                        div()
+                            .text_size(theme::text_body())
+                            .text_color(t.text)
+                            .child("Theme"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(theme::space_1())
+                            .child(theme_button(
+                                "theme-dark",
+                                "Dark",
+                                Appearance::Dark,
+                                cx,
+                                appearance == Appearance::Dark,
+                            ))
+                            .child(theme_button(
+                                "theme-light",
+                                "Light",
+                                Appearance::Light,
+                                cx,
+                                appearance == Appearance::Light,
+                            )),
+                    ),
+            ),
+        );
+
         div()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap(theme::space_5())
+            .child(window)
+            .child(appearance_section)
+            .into_any_element()
+    }
+
+    fn render_mentions(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let mentions = self.state.settings.discord_mentions.clone();
+
+        let rows: Vec<gpui::AnyElement> = mentions
+            .iter()
+            .map(|mention| {
+                let nickname = if mention.nickname.is_empty() {
+                    "Unnamed".to_string()
+                } else {
+                    mention.nickname.clone()
+                };
+                let remove_id = mention.id.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(theme::space_3())
+                    .px(theme::space_3())
+                    .py(theme::space_2())
+                    .bg(t.surface_hover)
+                    .rounded(theme::radius_md())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme::space_3())
+                            .child(
+                                div()
+                                    .text_size(theme::text_body())
+                                    .text_color(t.text)
+                                    .child(nickname),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme::text_small())
+                                    .text_color(t.text_faint)
+                                    .child(mention.id.clone()),
+                            ),
+                    )
+                    .child(
+                        Button::new(format!("remove-mention-{remove_id}"), "Remove")
+                            .variant(ButtonVariant::Ghost)
+                            .size(crate::ui::components::ButtonSize::Sm)
+                            .on_click(cx.listener(
+                                move |this, _event: &ClickEvent, _window, cx| {
+                                    let remaining: Vec<DiscordMention> = this
+                                        .state
+                                        .settings
+                                        .discord_mentions
+                                        .iter()
+                                        .filter(|item| item.id != remove_id)
+                                        .cloned()
+                                        .collect();
+                                    this.persist(json!({ "discordMentions": remaining }));
+                                    cx.notify();
+                                },
+                            )),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let at_capacity = mentions.len() >= MAX_DISCORD_USER_IDS;
+        let add_row = div()
+            .flex()
+            .items_center()
+            .gap(theme::space_2())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(Input::new(&self.mention_nickname)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(Input::new(&self.mention_id)),
+            )
+            .child(
+                Button::new("add-mention", "Add")
+                    .variant(ButtonVariant::Secondary)
+                    .disabled(at_capacity)
+                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                        let id = this.mention_id.read(cx).value().trim().to_string();
+                        let nickname = this.mention_nickname.read(cx).value().trim().to_string();
+                        if !is_valid_discord_id(&id) {
+                            this.mention_error =
+                                Some("Enter a valid Discord user ID (17–20 digits).".to_string());
+                            cx.notify();
+                            return;
+                        }
+                        if this
+                            .state
+                            .settings
+                            .discord_mentions
+                            .iter()
+                            .any(|item| item.id == id)
+                        {
+                            this.mention_error = Some("That user is already added.".to_string());
+                            cx.notify();
+                            return;
+                        }
+                        if this.state.settings.discord_mentions.len() >= MAX_DISCORD_USER_IDS {
+                            this.mention_error =
+                                Some("You can mention up to 5 people.".to_string());
+                            cx.notify();
+                            return;
+                        }
+                        let mut next = this.state.settings.discord_mentions.clone();
+                        next.push(DiscordMention {
+                            id: id.clone(),
+                            nickname: nickname.chars().take(40).collect(),
+                        });
+                        this.persist(json!({ "discordMentions": next }));
+                        this.mention_error = None;
+                        this.mention_id
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        this.mention_nickname
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        cx.notify();
+                    })),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme::space_2())
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .gap(theme::space_1())
                     .child(
                         div()
-                            .text_color(theme::text_primary())
-                            .child("Discord notifications"),
+                            .text_size(theme::text_small())
+                            .font_weight(theme::weight_medium())
+                            .text_color(t.text_muted)
+                            .child("People to mention"),
                     )
-                    .child(div().text_sm().text_color(theme::text_secondary()).child(
-                        "Messages are downstream of Auto Accept and never delay or control it.",
-                    )),
-            )
-            .child(Self::toggle_row(
-                "toggle-discord",
-                "Enable Discord notifications",
-                "Queue popped, auto-accepted and game-started alerts.",
-                discord_enabled,
-                ToggleAction::Discord,
-                cx,
-            ))
-            .child(
-                Surface::new()
-                    .elevation(Elevation::Base)
-                    .child(webhook_field),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
                     .child(
-                        Button::new(
-                            "test-webhook",
-                            if testing {
-                                "Sending…"
-                            } else {
-                                "Test Webhook"
-                            },
-                        )
-                        .variant(ButtonVariant::Primary)
-                        .disabled(testing)
-                        .on_click(cx.listener(
-                            |this, _event: &ClickEvent, _window, cx| {
-                                if this.state.webhook_testing {
-                                    return;
-                                }
-                                this.state.webhook_test = None;
-                                this.state.webhook_testing = true;
-                                let _ = this
-                                    .notifications
-                                    .try_send(NotificationCommand::TestWebhook);
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .child(div().text_sm().text_color(test_color).child(test_message)),
+                        div()
+                            .text_size(theme::text_caption())
+                            .text_color(t.text_faint)
+                            .child("Mentioned at the start of each notification. Up to 5."),
+                    ),
             )
-            .into_any_element()
+            .children(rows)
+            .child(add_row)
+            .when_some(self.mention_error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .text_size(theme::text_caption())
+                        .text_color(t.danger)
+                        .child(error),
+                )
+            })
     }
 }
 
 impl Render for Dashboard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = theme::current();
         let t = Theme::of(cx);
         let summary = self.state.summary();
         let screen = self.screen;
 
         let body = match screen {
-            Screen::Dashboard => self.render_dashboard(cx),
+            Screen::AutoAccept => self.render_dashboard(cx),
+            Screen::Notifications => self.render_notifications(cx),
             Screen::Settings => self.render_settings(cx),
         };
 
         let nav_view = cx.entity();
-        let theme_view = cx.entity();
 
         let sidebar = Sidebar::new(
             screen,
@@ -439,17 +714,12 @@ impl Render for Dashboard {
         );
 
         let header = match screen {
-            Screen::Dashboard => PageHeader::new("Dashboard").subtitle("Ready-check automation"),
-            Screen::Settings => {
-                PageHeader::new("Settings").subtitle("Notifications and preferences")
-            }
+            Screen::AutoAccept => PageHeader::new("Auto Accept"),
+            Screen::Notifications => PageHeader::new("Notifications"),
+            Screen::Settings => PageHeader::new("Settings"),
         };
 
-        let title_bar = TitleBar::new(appearance, move |_event, _window, app| {
-            let next = theme::current().toggled();
-            theme::set_appearance(app, next);
-            theme_view.update(app, |_this, cx| cx.notify());
-        });
+        let title_bar = TitleBar::new();
 
         div()
             .flex()
@@ -476,7 +746,7 @@ impl Render for Dashboard {
                                 .overflow_y_scroll()
                                 .px(theme::space_8())
                                 .pb(theme::space_8())
-                                .child(body),
+                                .child(div().flex().flex_col().flex_shrink_0().child(body)),
                         ),
                 ),
             )
