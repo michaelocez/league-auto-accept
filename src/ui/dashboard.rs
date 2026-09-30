@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use gpui::base::input::{Input, InputEvent, InputState};
+use gpui::prelude::*;
 use gpui::{
-    div, prelude::*, rgb, ClickEvent, Context, Entity, FocusHandle, IntoElement, Render,
-    Subscription, Window,
+    div, ClickEvent, Context, Entity, FocusHandle, IntoElement, Render, Rgba, Subscription, Window,
 };
 use serde_json::json;
 
@@ -22,12 +22,23 @@ use crate::config::settings::AppSettings;
 use crate::config::store::SettingsStore;
 use crate::notifications::discord::parse_discord_webhook_url;
 use crate::platform::tray::TrayCommand;
+use crate::ui::components::{
+    Button, ButtonVariant, Divider, Elevation, LabeledField, StatusPill, Surface, Toggle,
+};
 use crate::ui::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Dashboard,
     Settings,
+}
+
+/// Which setting a toggle row switch controls.
+#[derive(Clone, Copy)]
+enum ToggleAction {
+    AutoAccept,
+    MinimizeToTray,
+    Discord,
 }
 
 pub struct Dashboard {
@@ -122,7 +133,7 @@ impl Dashboard {
     }
 }
 
-fn status_color(summary: &str) -> gpui::Rgba {
+fn status_color(summary: &str) -> Rgba {
     match summary {
         "Active" => theme::success(),
         "Connecting" => theme::warning(),
@@ -131,7 +142,7 @@ fn status_color(summary: &str) -> gpui::Rgba {
     }
 }
 
-fn activity_color(kind: ActivityKind) -> gpui::Rgba {
+fn activity_color(kind: ActivityKind) -> Rgba {
     match kind {
         ActivityKind::Info => theme::text_secondary(),
         ActivityKind::Accepted => theme::success(),
@@ -140,68 +151,55 @@ fn activity_color(kind: ActivityKind) -> gpui::Rgba {
 }
 
 impl Dashboard {
-    fn toggle_card(
+    /// A titled row with a switch on the right — the shared shape of an automation setting.
+    fn toggle_row(
         id: &'static str,
         title: &'static str,
         subtitle: &'static str,
         checked: bool,
-        on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+        action: ToggleAction,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (track, knob_bg, border) = if checked {
-            (theme::accent(), theme::text_primary(), theme::accent())
-        } else {
-            (
-                theme::surface_raised(),
-                theme::text_muted(),
-                theme::border_strong(),
-            )
-        };
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_4()
-            .px_4()
-            .py_4()
-            .bg(theme::surface())
-            .border_1()
-            .border_color(theme::border())
-            .rounded_lg()
-            .cursor_pointer()
-            .hover(|style| {
-                style
-                    .bg(theme::surface_raised())
-                    .border_color(theme::border_strong())
-            })
-            .on_click(on_click)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().text_color(theme::text_primary()).child(title))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::text_secondary())
-                            .child(subtitle),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .when(checked, |style| style.justify_end())
-                    .w(gpui::px(44.0))
-                    .h(gpui::px(24.0))
-                    .px(gpui::px(4.0))
-                    .bg(track)
-                    .border_1()
-                    .border_color(border)
-                    .rounded_full()
-                    .child(div().size(gpui::px(15.0)).bg(knob_bg).rounded_full()),
-            )
+        Surface::new().elevation(Elevation::Raised).child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(theme::space_4())
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(theme::space_1())
+                        .text_size(theme::text_body())
+                        .child(div().text_color(theme::text_primary()).child(title))
+                        .child(
+                            div()
+                                .text_size(theme::text_small())
+                                .text_color(theme::text_secondary())
+                                .child(subtitle),
+                        ),
+                )
+                .child(Toggle::new(id).checked(checked).on_change(cx.listener(
+                    move |this, _event: &ClickEvent, _window, cx| {
+                        match action {
+                            ToggleAction::AutoAccept => {
+                                let next = !this.state.settings.auto_accept_enabled;
+                                this.set_auto_accept(next);
+                            }
+                            ToggleAction::MinimizeToTray => {
+                                let next = !this.state.settings.minimize_to_tray;
+                                this.persist(json!({ "minimizeToTray": next }));
+                            }
+                            ToggleAction::Discord => {
+                                let next = !this.state.settings.discord_notifications_enabled;
+                                this.persist(json!({ "discordNotificationsEnabled": next }));
+                            }
+                        }
+                        cx.notify();
+                    },
+                ))),
+        )
     }
 
     fn nav_pill(
@@ -286,7 +284,7 @@ impl Dashboard {
                     .text_color(theme::text_secondary())
                     .child(connection_message),
             )
-            .child(Self::toggle_card(
+            .child(Self::toggle_row(
                 "toggle-auto-accept",
                 "Auto Accept",
                 if monitoring {
@@ -295,43 +293,29 @@ impl Dashboard {
                     "Accepts one ready check per queue."
                 },
                 auto_accept,
-                cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                    let next = !this.state.settings.auto_accept_enabled;
-                    this.set_auto_accept(next);
-                    cx.notify();
-                }),
+                ToggleAction::AutoAccept,
+                cx,
             ))
             .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .bg(theme::surface_raised())
-                    .border_1()
-                    .border_color(theme::border())
-                    .rounded_lg()
-                    .text_sm()
-                    .text_color(theme::text_secondary())
-                    .child(ready_message),
+                Surface::new().elevation(Elevation::Base).child(
+                    div()
+                        .text_size(theme::text_small())
+                        .text_color(theme::text_secondary())
+                        .child(ready_message),
+                ),
             )
-            .child(Self::toggle_card(
+            .child(Self::toggle_row(
                 "toggle-minimize",
                 "Minimize to tray",
                 "On: closing hides to tray. Off: closing exits (tray stays present).",
                 minimize,
-                cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                    let next = !this.state.settings.minimize_to_tray;
-                    this.persist(json!({ "minimizeToTray": next }));
-                    cx.notify();
-                }),
+                ToggleAction::MinimizeToTray,
+                cx,
             ))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .border_1()
-                    .border_color(theme::border())
-                    .rounded_lg()
-                    .bg(theme::surface())
+                Surface::new()
+                    .elevation(Elevation::Base)
+                    .padded(false)
                     .child(
                         div()
                             .px_4()
@@ -341,22 +325,16 @@ impl Dashboard {
                             .text_color(theme::text_secondary())
                             .child("Recent activity"),
                     )
+                    .child(Divider::horizontal())
                     .children(activity),
             )
             .child(
                 div().flex().justify_end().child(
-                    div()
-                        .id("quit")
-                        .px_4()
-                        .py_2()
-                        .bg(theme::accent())
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|style| style.opacity(0.9))
+                    Button::new("quit", "Quit")
+                        .variant(ButtonVariant::Primary)
                         .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
                             cx.quit();
-                        }))
-                        .child(div().text_color(rgb(0xffffff)).child("Quit")),
+                        })),
                 ),
             )
             .into_any_element()
@@ -386,6 +364,18 @@ impl Dashboard {
             }
         };
 
+        let webhook_field = if webhook_error.is_empty() {
+            LabeledField::new()
+                .label("Discord webhook URL")
+                .helper(format!("People to mention: {mentions}"))
+                .child(Input::new(&self.webhook))
+        } else {
+            LabeledField::new()
+                .label("Discord webhook URL")
+                .error(webhook_error)
+                .child(Input::new(&self.webhook))
+        };
+
         div()
             .flex()
             .flex_col()
@@ -404,47 +394,18 @@ impl Dashboard {
                         "Messages are downstream of Auto Accept and never delay or control it.",
                     )),
             )
-            .child(Self::toggle_card(
+            .child(Self::toggle_row(
                 "toggle-discord",
                 "Enable Discord notifications",
                 "Queue popped, auto-accepted and game-started alerts.",
                 discord_enabled,
-                cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                    let next = !this.state.settings.discord_notifications_enabled;
-                    this.persist(json!({ "discordNotificationsEnabled": next }));
-                    cx.notify();
-                }),
+                ToggleAction::Discord,
+                cx,
             ))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .bg(theme::surface())
-                    .border_1()
-                    .border_color(theme::border())
-                    .rounded_lg()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::text_secondary())
-                            .child("Discord webhook URL"),
-                    )
-                    .child(Input::new(&self.webhook))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::danger())
-                            .child(webhook_error),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::text_secondary())
-                            .child(format!("People to mention: {mentions}")),
-                    ),
+                Surface::new()
+                    .elevation(Elevation::Base)
+                    .child(webhook_field),
             )
             .child(
                 div()
@@ -452,16 +413,18 @@ impl Dashboard {
                     .items_center()
                     .gap_3()
                     .child(
-                        div()
-                            .id("test-webhook")
-                            .px_4()
-                            .py_2()
-                            .bg(theme::accent())
-                            .rounded_md()
-                            .cursor_pointer()
-                            .opacity(if testing { 0.6 } else { 1.0 })
-                            .hover(|style| style.opacity(0.9))
-                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                        Button::new(
+                            "test-webhook",
+                            if testing {
+                                "Sending…"
+                            } else {
+                                "Test Webhook"
+                            },
+                        )
+                        .variant(ButtonVariant::Primary)
+                        .disabled(testing)
+                        .on_click(cx.listener(
+                            |this, _event: &ClickEvent, _window, cx| {
                                 if this.state.webhook_testing {
                                     return;
                                 }
@@ -471,12 +434,8 @@ impl Dashboard {
                                     .notifications
                                     .try_send(NotificationCommand::TestWebhook);
                                 cx.notify();
-                            }))
-                            .child(div().text_color(rgb(0xffffff)).child(if testing {
-                                "Sending…"
-                            } else {
-                                "Test Webhook"
-                            })),
+                            },
+                        )),
                     )
                     .child(div().text_sm().text_color(test_color).child(test_message)),
             )
@@ -539,19 +498,7 @@ impl Render for Dashboard {
                                 cx,
                                 Screen::Settings,
                             ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .px_3()
-                                    .py_1()
-                                    .border_1()
-                                    .border_color(theme::border())
-                                    .rounded_full()
-                                    .child(div().size(gpui::px(7.0)).bg(pill_color).rounded_full())
-                                    .child(div().text_sm().child(summary.to_string())),
-                            ),
+                            .child(StatusPill::new(summary, pill_color)),
                     ),
             )
             .child(body)

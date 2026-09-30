@@ -70,6 +70,8 @@ pub struct Theme {
     pub text_faint: Rgba,
     /// Brand/action accent.
     pub accent: Rgba,
+    /// Accent under the pointer.
+    pub accent_hover: Rgba,
     /// Foreground used on top of the accent.
     pub accent_fg: Rgba,
     /// A subdued accent-tinted surface (e.g. selected nav item background).
@@ -85,6 +87,14 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Resolves the theme for the current [`Appearance`] global, falling back to dark if unset.
+    pub fn of(cx: &App) -> Theme {
+        cx.try_global::<Appearance>()
+            .copied()
+            .unwrap_or_default()
+            .theme()
+    }
+
     pub const fn dark() -> Self {
         Self {
             window_bg: rgb(0x0c0d10),
@@ -101,6 +111,7 @@ impl Theme {
             text_muted: rgb(0x9aa1ad),
             text_faint: rgb(0x686f7b),
             accent: rgb(0x6e79e0),
+            accent_hover: rgb(0x7f89e8),
             accent_fg: rgb(0xffffff),
             accent_subtle: rgb(0x262a45),
             success: rgb(0x45c184),
@@ -126,6 +137,7 @@ impl Theme {
             text_muted: rgb(0x5b6270),
             text_faint: rgb(0x8a909c),
             accent: rgb(0x5560d8),
+            accent_hover: rgb(0x4650c6),
             accent_fg: rgb(0xffffff),
             accent_subtle: rgb(0xe6e8fb),
             success: rgb(0x1f9d5b),
