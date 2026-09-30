@@ -465,23 +465,6 @@ impl Dashboard {
         )));
 
         let appearance = theme::current();
-        let theme_button = |id: &'static str,
-                            label: &'static str,
-                            value: Appearance,
-                            cx: &mut Context<Self>,
-                            active: bool| {
-            Button::new(id, label)
-                .variant(if active {
-                    ButtonVariant::Primary
-                } else {
-                    ButtonVariant::Ghost
-                })
-                .size(crate::ui::components::ButtonSize::Sm)
-                .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
-                    theme::set_appearance(cx, value);
-                    cx.notify();
-                }))
-        };
         let appearance_section = Surface::new().child(
             Section::new().title("Appearance").child(
                 div()
@@ -498,20 +481,18 @@ impl Dashboard {
                     .child(
                         div()
                             .flex()
-                            .gap(theme::space_1())
-                            .child(theme_button(
+                            .gap(theme::space_3())
+                            .child(self.appearance_option(
                                 "theme-dark",
-                                "Dark",
                                 Appearance::Dark,
-                                cx,
                                 appearance == Appearance::Dark,
-                            ))
-                            .child(theme_button(
-                                "theme-light",
-                                "Light",
-                                Appearance::Light,
                                 cx,
+                            ))
+                            .child(self.appearance_option(
+                                "theme-light",
+                                Appearance::Light,
                                 appearance == Appearance::Light,
+                                cx,
                             )),
                     ),
             ),
@@ -523,6 +504,113 @@ impl Dashboard {
             .gap(theme::space_5())
             .child(window)
             .child(appearance_section)
+            .into_any_element()
+    }
+
+    /// A theme choice rendered as a mini window preview in that theme, so the effect is visible
+    /// before it is applied.
+    fn appearance_option(
+        &self,
+        id: &'static str,
+        value: Appearance,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let current = Theme::of(cx);
+        let target = value.theme();
+        let label = match value {
+            Appearance::Dark => "Dark",
+            Appearance::Light => "Light",
+        };
+        let ring = if selected {
+            current.accent
+        } else {
+            current.border
+        };
+
+        div()
+            .id(id)
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(theme::space_2())
+            .cursor_pointer()
+            .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
+                theme::set_appearance(cx, value);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w(px(96.0))
+                    .h(px(64.0))
+                    .rounded(theme::radius_md())
+                    .overflow_hidden()
+                    .border_2()
+                    .border_color(ring)
+                    .bg(target.window_bg)
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(10.0))
+                            .flex_shrink_0()
+                            .bg(target.sidebar_bg)
+                            .border_b_1()
+                            .border_color(target.border),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .child(div().w(px(18.0)).h_full().bg(target.sidebar_bg))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .gap(px(4.0))
+                                    .p(px(7.0))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .h(px(7.0))
+                                            .rounded(px(2.0))
+                                            .bg(target.surface_hover),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .h(px(7.0))
+                                            .rounded(px(2.0))
+                                            .bg(target.surface_hover),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(28.0))
+                                            .h(px(7.0))
+                                            .rounded(px(2.0))
+                                            .bg(target.surface_hover),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(theme::text_small())
+                    .font_weight(if selected {
+                        theme::weight_medium()
+                    } else {
+                        theme::weight_regular()
+                    })
+                    .text_color(if selected {
+                        current.text
+                    } else {
+                        current.text_muted
+                    })
+                    .child(label),
+            )
             .into_any_element()
     }
 
