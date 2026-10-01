@@ -1,3 +1,6 @@
+// Release builds are GUI apps: no console window opens alongside the application.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! League Auto Accept (Rust + GPUI) entry point.
 //!
 //! Wires the always-present tray, the single-instance guard, the headless League service and the
