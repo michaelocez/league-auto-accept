@@ -58,15 +58,26 @@ impl Default for TitleBar {
     }
 }
 
+/// The app mark: a small circle with a check, matching the application/tray icon identity. A faint
+/// ring keeps the circle legible on the dark title bar where the icon's `#18181b` would vanish.
 pub(crate) fn app_mark(t: &Theme) -> impl IntoElement {
     div()
         .flex()
         .items_center()
         .justify_center()
         .size(px(18.0))
-        .rounded(px(5.0))
-        .bg(t.accent)
-        .child(div().size(px(7.0)).rounded_full().bg(t.accent_fg))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(gpui::rgb(0x18181b))
+        .border_1()
+        .border_color(t.border_strong)
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(gpui::rgb(0xf4f4f5))
+                .child("\u{2713}"), // ✓
+        )
 }
 
 impl RenderOnce for TitleBar {

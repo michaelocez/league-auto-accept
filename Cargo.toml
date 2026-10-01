@@ -35,6 +35,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 rcgen = "0.13"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

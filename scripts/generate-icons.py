@@ -1,3 +1,9 @@
+"""Generate the application + tray icons.
+
+Design: a full circle (#18181b) with a centred, rounded-cap checkmark (#f4f4f5) — minimal and
+monochrome, matching the app UI. Original artwork; no third-party assets or trade dress.
+"""
+
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -7,49 +13,41 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
 SCALE = 4
 
+DARK = (24, 24, 27, 255)      # #18181b
+LIGHT = (244, 244, 245, 255)  # #f4f4f5
+
+# Circle inset as a fraction of the canvas (V2 "roomier circle").
+CIRCLE_MARGIN = 0.06
+# Centred checkmark (option A proportions), normalised to the canvas.
+CHECK = {
+    "p0": (0.29, 0.525),
+    "elbow": (0.44, 0.665),
+    "p2": (0.735, 0.345),
+    "width": 0.115,
+}
+
 
 def draw_icon(size: int) -> Image.Image:
     canvas_size = size * SCALE
     image = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    margin = round(canvas_size * 0.055)
-    radius = round(canvas_size * 0.22)
-    draw.rounded_rectangle(
-        (margin, margin, canvas_size - margin, canvas_size - margin),
-        radius=radius,
-        fill=(7, 16, 29, 255),
-        outline=(38, 55, 77, 255),
-        width=max(SCALE, round(canvas_size * 0.018)),
-    )
-
-    center = canvas_size / 2
-    ring_radius = canvas_size * 0.305
-    ring_width = max(SCALE * 2, round(canvas_size * 0.075))
+    margin = round(canvas_size * CIRCLE_MARGIN)
     draw.ellipse(
-        (
-            center - ring_radius,
-            center - ring_radius,
-            center + ring_radius,
-            center + ring_radius,
-        ),
-        outline=(94, 106, 210, 255),
-        width=ring_width,
+        (margin, margin, canvas_size - margin, canvas_size - margin),
+        fill=DARK,
     )
 
-    check_width = max(SCALE * 2, round(canvas_size * 0.085))
-    check_points = [
-        (canvas_size * 0.31, canvas_size * 0.52),
-        (canvas_size * 0.445, canvas_size * 0.655),
-        (canvas_size * 0.70, canvas_size * 0.365),
+    points = [
+        (CHECK["p0"][0] * canvas_size, CHECK["p0"][1] * canvas_size),
+        (CHECK["elbow"][0] * canvas_size, CHECK["elbow"][1] * canvas_size),
+        (CHECK["p2"][0] * canvas_size, CHECK["p2"][1] * canvas_size),
     ]
-    draw.line(check_points, fill=(247, 248, 248, 255), width=check_width, joint="curve")
-    endpoint_radius = check_width / 2
-    for x, y in check_points:
-        draw.ellipse(
-            (x - endpoint_radius, y - endpoint_radius, x + endpoint_radius, y + endpoint_radius),
-            fill=(247, 248, 248, 255),
-        )
+    stroke = max(SCALE * 2, round(CHECK["width"] * canvas_size))
+    draw.line(points, fill=LIGHT, width=stroke, joint="curve")
+    cap = stroke / 2
+    for x, y in points:
+        draw.ellipse((x - cap, y - cap, x + cap, y + cap), fill=LIGHT)
 
     return image.resize((size, size), Image.Resampling.LANCZOS)
 
