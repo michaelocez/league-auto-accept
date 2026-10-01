@@ -1,8 +1,5 @@
-node_modules/
-dist/
-dist-electron/
-.test-dist/
-release/
+/target/
+/release/
 *.log
-.DS_Store
 Thumbs.db
+.DS_Store

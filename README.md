@@ -1,108 +1,129 @@
 # League Auto Accept
 
-A focused Windows Electron utility for League of Legends ready checks.
+A small, native Windows utility that watches the League of Legends client and automatically accepts
+ready checks, with optional Discord webhook notifications. Built with **Rust + GPUI** as a
+portable, single-executable app.
 
-## Current status
+It is an ordinary user-mode application: no installer, no administrator privileges, no background
+service or driver, no telemetry, and no remote content in the UI.
 
-The initial release candidate provides a focused Auto Accept and notification utility:
+## Features
 
-- sandboxed Electron renderer with context isolation and no Node integration;
-- narrow, typed preload bridge;
-- versioned local settings with Windows-backed encryption for the webhook URL
-  when Electron's OS encryption is available;
-- one-page settings interface;
-- optional minimize/close-to-tray behaviour;
-- single-instance lifecycle;
-- automatic Windows Riot installation and running lockfile discovery;
-- authenticated, loopback-only League Client health checks;
-- bounded LCU WebSocket framing with handshake verification and reconnects;
-- live League Client status in the window and tray;
-- a main-process ready-check state machine that continues while the window is hidden;
-- duplicate-event coalescing and one accept request at a time;
-- cancellation when Auto Accept is disabled or the League Client disconnects;
-- one bounded retry after a failed accept request;
-- live ready-check status in the window and tray;
-- optional queue-pop, successful auto-accept, and in-game Discord notifications;
-- exactly one notification of each enabled type per matching lifecycle transition;
-- editable message templates with a `{mentions}` placeholder;
-- an explicit allowlist of up to five Discord user mentions with local nicknames;
-- a Test Webhook action with success and failure feedback;
-- strict Discord webhook URL validation, bounded HTTPS requests, and no redirects;
-- an original application and tray icon;
-- an as-invoker Windows installer with optional install location and shortcuts;
-- settings validation and persistence tests.
+- **Detects the League Client** automatically (install discovery + lockfile) and authenticates
+  against its loopback LCU API.
+- **Monitors ready checks** over the LCU WebSocket and **auto-accepts** them — one accept per ready
+  check, with bounded retries, cancellation, and reconnect handling.
+- **Discord notifications**: webhook alerts for queue popped,
+  auto-accepted, and game-started, with optional `{mentions}` of up to five Discord users.
+- **Always-present system tray**: live status, an Auto Accept
+  toggle, Open, and Quit.
+- **Settings** persist per user (Auto Accept state, minimize-to-tray, Discord config, mentions).
+- **Single instance**; minimize/close-to-tray is configurable.
 
-Discord delivery is downstream of Auto Accept: lifecycle notifications are
-fire-and-forget, rejected promises are contained, and even a synchronous
-notification failure cannot delay, retry, or change the accept result.
+## Download and run
+
+1. Download `league-auto-accept.exe` from the
+   [latest release](https://github.com/michaelocez/league-auto-accept/releases/latest).
+2. Put it anywhere and run it. That's it.
+
+It is **portable**: a single self-contained executable (statically linked C runtime, embedded
+icons), with **no installer and no setup**. It runs on a clean Windows machine with nothing
+pre-installed and leaves no install footprint — to remove it, delete the file. The only thing it
+creates is its own per-user settings file (see [Configuration](#configuration)).
+
+> The executable is unsigned, so Windows SmartScreen may warn on first run ("More info" →
+> "Run anyway"). Code signing is out of scope for now.
+
+## Usage
+
+- **Enable Auto Accept** from the main window or the tray popup. It only accepts ready checks while
+  the League Client is connected; the UI shows `Active`, `Connecting`, `League offline`, or
+  `Disabled` so you always know the real state.
+- **Notifications**: open the Notifications page, enable Discord notifications, paste a Discord
+  webhook URL, optionally add people to mention (nickname + Discord user ID), and use **Test
+  Webhook** to verify.
+
+## Configuration
+
+Settings are stored as JSON at:
+
+```
+%APPDATA%\League Auto Accept\settings.json
+```
+
+The only secret is the Discord webhook URL; it is encrypted with the OS codec where available and
+is never logged or exposed to the UI layer.
+
+## Requirements
+
+- Windows 10/11 (x64).
+
+That's it for running the release build. No League installation is required to build or run.
+
+### Building from source
+
+- Rust (stable) with the MSVC toolchain and Visual Studio Build Tools (`link.exe`).
 
 ## Development
 
-Requirements: Node.js 22.12 or newer and npm 10 or newer.
-
 ```powershell
-npm install
-npm run dev
+cargo run            # debug build; opens a console for logs
 ```
 
-Validation:
+## Building a release
 
 ```powershell
-npm run verify
+cargo build --release
+# -> target\release\league-auto-accept.exe
 ```
 
-Create the Windows installer:
+The release profile is configured for portable distribution: the C runtime is statically linked
+(`.cargo/config.toml`) and the binary is a GUI-subsystem app (no console window), with the
+application icon embedded into the executable.
+
+## Testing
 
 ```powershell
-npm run package:win
+cargo test
 ```
 
-The installer is written to `release/`. The application does not request
-administrator privileges or configure itself to launch when Windows starts.
-Minimize-to-tray is enabled by default and can be turned off in the app.
+The test suite runs without a live League client; the LCU transport is verified against a
+self-signed mock server.
 
-Local development builds are not digitally signed and may therefore trigger a
-Windows SmartScreen warning. A publicly distributed release should be signed
-with a trusted Windows code-signing certificate before publication.
+## Validation
 
-## Local data and outbound requests
+```powershell
+cargo fmt --check
+cargo check --all-targets
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+```
 
-Settings are stored in Electron's per-user application-data directory. The
-Discord webhook URL uses Windows-backed encryption when Electron reports that
-OS encryption is available. Other preferences, Discord user IDs, and local
-nicknames are stored as ordinary local settings. Nicknames identify saved IDs
-inside the app; they do not rename users or get transmitted to Discord.
+## Architecture
 
-The application talks to the League Client only through its authenticated
-loopback API. It contacts Discord only when an enabled notification fires or
-the user presses **Test Webhook**. It has no analytics or update service.
+```text
+GPUI views
+   -> application state / actions
+      -> background async service (tokio)
+         -> League service -> LCU (REST + WebSocket)
+         -> Discord notifier
+```
+
+The UI observes application state and emits intents; it never owns LCU credentials or performs
+networking. The League backend runs on a background thread and communicates with the UI over a
+channel, so the client being closed or restarted never blocks or crashes the app.
 
 ## Security model
 
-The renderer cannot access Node.js, the filesystem, Electron IPC primitives, or
-network credentials directly. Main-process IPC handlers accept calls only from
-the current application window. Navigation, popups, webviews, permissions, and
-remote content are denied by default.
+- LCU credentials stay in the privileged backend layer; the UI cannot access them.
+- Only the fixed League Client ready-check endpoints are used.
+- Discord webhook URLs are validated; outbound requests are constrained and do not follow redirects.
+- No analytics, telemetry, updater, or remote content.
 
-LCU credentials and webhook delivery remain in the main process. The renderer
-can request a test through one narrow IPC method, but it cannot send arbitrary
-URLs or payloads: the main process reads the normalized saved settings and
-validates them again before delivery.
+## License
 
-Discord webhook delivery sends the rendered message and configured Discord user
-IDs to the selected Discord webhook. `allowed_mentions` disables automatic
-parsing and permits only those explicit user IDs, so text such as `@everyone`
-does not create an unintended mass mention.
+MIT — see [LICENSE](LICENSE).
 
-Auto Accept calls only the fixed League Client endpoint
-`/lol-matchmaking/v1/ready-check/accept`. It coalesces repeated events, permits
-one request at a time, and stops after two total attempts for a ready-check
-cycle. No live matchmaking or queue acceptance is performed by the automated
-test suite.
-
-## Attribution
-
-Architectural patterns are adapted from League Profile Tool under the MIT
-License. League Auto Accept is independently authored by michaelocez; upstream
-contributors did not participate in this project. See the project
-[license](LICENSE) and [third-party notices](NOTICE.md).
+League Auto Accept isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot
+Games or anyone officially involved in producing or managing Riot Games properties. Riot Games and
+all associated properties are trademarks or registered trademarks of Riot Games, Inc.
