@@ -8,7 +8,8 @@
 use async_channel::Sender;
 use gpui::prelude::*;
 use gpui::{
-    div, px, ClickEvent, Context, Entity, FocusHandle, IntoElement, Render, Subscription, Window,
+    div, px, ClickEvent, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, Render,
+    Subscription, Window,
 };
 
 use crate::app::events::AppEvent;
@@ -44,6 +45,8 @@ impl TrayPopup {
             }
         });
         window.focus(&focus_handle, cx);
+        // Force OS activation so a later click elsewhere reliably deactivates (and dismisses) us.
+        window.activate_window();
 
         Self {
             dashboard,
@@ -75,22 +78,51 @@ impl Render for TrayPopup {
             .border_1()
             .border_color(t.border_strong)
             .text_color(t.text)
+            .track_focus(&self.focus_handle)
+            .on_key_down(|event: &KeyDownEvent, window, _cx| {
+                if event.keystroke.key == "escape" {
+                    window.remove_window();
+                }
+            })
             // Header
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(theme::space_2())
+                    .justify_between()
                     .px(theme::space_4())
                     .py(theme::space_3())
                     .border_b_1()
                     .border_color(t.border)
-                    .child(app_mark(&t))
                     .child(
                         div()
-                            .text_size(theme::text_body())
-                            .font_weight(theme::weight_semibold())
-                            .child("League Auto Accept"),
+                            .flex()
+                            .items_center()
+                            .gap(theme::space_2())
+                            .child(app_mark(&t))
+                            .child(
+                                div()
+                                    .text_size(theme::text_body())
+                                    .font_weight(theme::weight_semibold())
+                                    .child("League Auto Accept"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("popup-close")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.0))
+                            .rounded(theme::radius_sm())
+                            .cursor_pointer()
+                            .text_size(px(12.0))
+                            .text_color(t.text_muted)
+                            .hover(|style| style.bg(t.surface_hover).text_color(t.text))
+                            .on_click(|_event: &ClickEvent, window, _app| {
+                                window.remove_window();
+                            })
+                            .child("\u{2715}"), // ✕
                     ),
             )
             // Status + primary control
@@ -157,7 +189,8 @@ impl Render for TrayPopup {
                             }),
                     )
                     .child(
-                        Button::new("popup-quit", "Quit")
+                        // Explicitly "Quit app" (not "close"): the ✕ / click-away close the popup.
+                        Button::new("popup-quit", "Quit app")
                             .variant(ButtonVariant::Ghost)
                             .on_click(move |_event: &ClickEvent, _window, _app| {
                                 let _ = quit_tx.try_send(AppEvent::Tray(TrayCommand::Quit));
