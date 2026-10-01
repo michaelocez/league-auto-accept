@@ -72,7 +72,7 @@ fn main() {
         gpui::init(cx);
 
         // Establish the single source of truth for the active visual appearance before any view
-        // renders. Later phases flip this from the title-bar theme toggle.
+        // renders (Light/Dark is changed from the Settings page).
         theme::set_appearance(cx, Appearance::Dark);
 
         // Capture the native window handle once (pure Win32 hide/show; no re-entrant GPUI borrows).

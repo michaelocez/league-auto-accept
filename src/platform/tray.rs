@@ -1,4 +1,4 @@
-//! System tray (Spike B).
+//! System tray.
 //!
 //! The tray is **always present while the app runs**, independent of any setting (decision A1).
 //! `minimizeToTray` only changes what closing the window does.

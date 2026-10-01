@@ -3,7 +3,7 @@ name = "league-auto-accept"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.80"
-description = "A focused Windows utility for League of Legends ready checks (Rust + GPUI rewrite)."
+description = "A focused Windows utility for League of Legends ready checks."
 license = "MIT"
 publish = false
 
@@ -13,8 +13,9 @@ publish = false
 # imports working while switching the foundation to the gpui-base-compatible snapshot.
 gpui = { package = "gpui-kit", version = "0.7", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
-tokio-rustls = "0.26"
-rustls = { version = "0.23", features = ["ring"] }
+# Use the ring crypto backend only; default features would pull in the unused aws-lc-rs backend.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-native-certs = "0.8"
 sha1 = "0.10"
 base64 = "0.22"

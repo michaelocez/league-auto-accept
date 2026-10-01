@@ -19,7 +19,7 @@ pub enum ActivityKind {
 
 const MAX_ACTIVITY: usize = 8;
 
-/// LCU connection status. Mirrors the Electron `ConnectionStatus` contract.
+/// LCU connection status shown to the user.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ConnectionStatus {
     Disconnected,
@@ -37,7 +37,7 @@ impl ConnectionStatus {
     }
 }
 
-/// Ready-check status. Mirrors the Electron `ReadyCheckStatus` contract.
+/// Ready-check status shown to the user.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ReadyCheckStatus {
     Idle,
@@ -73,9 +73,6 @@ impl ReadyCheckStatus {
 }
 
 /// The single authoritative application state. Both the window and the tray derive from this.
-///
-/// Phase 1 keeps this deliberately small; the full model (activity log, notification state,
-/// reconnect state, ...) arrives with the League service in Phase 2.
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub settings: AppSettings,

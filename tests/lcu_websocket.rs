@@ -1,15 +1,14 @@
-//! Spike D — LCU WebSocket transport, proven in isolation against a self-signed mock server.
+//! LCU WebSocket transport, exercised against a self-signed mock server.
 //!
-//! Proves the technically difficult parts without a live League client:
+//! Covers the parts that are awkward to test against a live League client:
 //!   * TLS to a self-signed loopback server
 //!   * HTTP Basic authentication on the WebSocket upgrade
 //!   * WebSocket upgrade handshake
 //!   * the `[5,"OnJsonApiEvent"]` subscription frame
 //!   * receiving and parsing a representative LCU JSON API event
 //!
-//! The mock mirrors the real LCU's self-signed loopback behaviour (the Electron reference uses
-//! `rejectUnauthorized:false`). Here we instead pin the generated certificate as a trust root,
-//! which proves TLS works while keeping certificate verification meaningful.
+//! The mock mirrors the real LCU's self-signed loopback behaviour. We pin the generated
+//! certificate as a trust root, which proves TLS works while keeping verification meaningful.
 
 use std::sync::Arc;
 use std::time::Duration;

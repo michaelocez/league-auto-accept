@@ -1,8 +1,7 @@
 //! LCU request construction and endpoint validation.
 //!
-//! Ported from the reference implementation (`Electron V1/src/main/lcu/lcu-client.ts`,
-//! `isAllowedLcuEndpoint`). Only endpoints under `/lol-` are ever reachable; the application
-//! itself uses only the four fixed endpoints in `league::mod`.
+//! Only endpoints under `/lol-` are ever reachable; the application itself uses only the fixed
+//! endpoints in `league::mod`.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -76,12 +75,12 @@ impl std::fmt::Display for LcuRequestError {
 
 impl std::error::Error for LcuRequestError {}
 
-/// Maximum request body size (reference: 1 MiB).
+/// Maximum request body size (1 MiB).
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-/// Maximum endpoint length (reference: 4096).
+/// Maximum endpoint length.
 pub const MAX_ENDPOINT_LEN: usize = 4096;
 
-/// Validates an LCU endpoint. Mirrors `isAllowedLcuEndpoint`.
+/// Validates an LCU endpoint.
 pub fn is_allowed_lcu_endpoint(endpoint: &str) -> bool {
     if !endpoint.starts_with("/lol-") || endpoint.len() > MAX_ENDPOINT_LEN {
         return false;

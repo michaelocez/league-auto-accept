@@ -1,8 +1,7 @@
 //! WebSocket frame decoding for LCU events.
 //!
-//! Ported from the reference implementation
-//! (`Electron V1/src/main/lcu/websocket-frame-decoder.ts`). Server frames are unmasked; masked
-//! server frames, reserved bits, invalid control frames and unknown opcodes are rejected.
+//! Server frames are unmasked; masked server frames, reserved bits, invalid control frames and
+//! unknown opcodes are rejected.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecodedFrame {

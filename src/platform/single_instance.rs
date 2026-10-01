@@ -4,7 +4,7 @@
 //! launch can ask the first to show its window. No manual Win32 window is required, so this
 //! does not conflict with GPUI's own message loop.
 //!
-//! Observable behaviour mirrors the Electron app: a second launch focuses the first and exits.
+//! Behaviour: a second launch focuses the first instance and exits.
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0,
@@ -13,8 +13,8 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject, INFINITE,
 };
 
-const MUTEX_NAME: &str = "Local\\LeagueAutoAccept.RustRewrite.Instance";
-const EVENT_NAME: &str = "Local\\LeagueAutoAccept.RustRewrite.ShowWindow";
+const MUTEX_NAME: &str = "Local\\LeagueAutoAccept.Instance";
+const EVENT_NAME: &str = "Local\\LeagueAutoAccept.ShowWindow";
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()

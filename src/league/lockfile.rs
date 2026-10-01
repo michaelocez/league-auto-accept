@@ -1,16 +1,14 @@
 //! League Client lockfile parsing.
 //!
-//! Ported from the reference implementation
-//! (`Electron V1/src/main/lcu/client-locator.ts`, `parseLockfile`). The lockfile is a
-//! colon-separated line: `processName:processId:port:password:protocol`.
+//! The lockfile is a colon-separated line: `processName:processId:port:password:protocol`.
 
 use std::path::{Path, PathBuf};
 
-/// The reference implementation rejects lockfiles larger than this.
+/// Lockfiles larger than this are rejected.
 pub const MAX_LOCKFILE_BYTES: u64 = 2048;
-/// Maximum accepted password length (reference: 512).
+/// Maximum accepted password length.
 pub const MAX_PASSWORD_LEN: usize = 512;
-/// Maximum accepted process-name length (reference: 128).
+/// Maximum accepted process-name length.
 pub const MAX_PROCESS_NAME_LEN: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,8 +21,8 @@ pub struct LcuCredentials {
 }
 
 impl LcuCredentials {
-    /// Change-detection signature used by the controller. Mirrors the reference
-    /// `lcuCredentialSignature` (`processId:port:password`).
+    /// Change-detection signature used to notice a restarted or replaced client
+    /// (`processId:port:password`).
     pub fn signature(&self) -> String {
         format!("{}:{}:{}", self.process_id, self.port, self.password)
     }

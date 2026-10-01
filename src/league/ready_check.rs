@@ -1,10 +1,9 @@
 //! Ready-check / auto-accept state machine.
 //!
-//! A faithful, side-effect-free port of the reference behaviour
-//! (`Electron V1/src/main/auto-accept-controller.ts`). The machine makes no network calls and
-//! reads no clock: it consumes events and emits `Effect`s, which the async service executes.
-//! This keeps the subtle invariants (one accept at a time, duplicate coalescing, bounded retry,
-//! generation-guarded staleness, cancellation) fully deterministic and unit-testable.
+//! Side-effect-free: the machine makes no network calls and reads no clock; it consumes events
+//! and emits `Effect`s, which the async service executes. This keeps the subtle invariants (one
+//! accept at a time, duplicate coalescing, bounded retry, generation-guarded staleness,
+//! cancellation) fully deterministic and unit-testable.
 
 use super::{GAMEFLOW_ENDPOINT, READY_CHECK_ENDPOINT};
 

@@ -1,8 +1,7 @@
 //! Discord webhook delivery.
 //!
-//! Ported from the reference implementation (`Electron V1/src/main/discord-webhook-client.ts`).
-//! Strict URL validation, bounded HTTPS request, no redirects, and an explicit mention allowlist
-//! (`allowed_mentions.parse = []`) so text such as `@everyone` cannot mass-ping.
+//! Strict URL validation, a bounded HTTPS request, no redirects, and an explicit mention
+//! allowlist (`allowed_mentions.parse = []`) so text such as `@everyone` cannot mass-ping.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -69,7 +68,7 @@ pub struct WebhookTarget {
     pub path: String,
 }
 
-/// Validates a Discord webhook URL. Mirrors `parseDiscordWebhookUrl`.
+/// Validates a Discord webhook URL.
 pub fn parse_discord_webhook_url(value: &str) -> Option<WebhookTarget> {
     let value = value.trim();
     if value.len() > MAX_WEBHOOK_URL_LENGTH {
@@ -147,7 +146,8 @@ pub fn discord_webhook_payload(content: &str, user_ids: &[String]) -> String {
 /// Real HTTPS sender. The network path is not auto-tested (requires internet); URL validation and
 /// payload construction are unit-tested below.
 pub struct DiscordWebhookClient {
-    config: Arc<ClientConfig>,
+    /// TLS setup is fallible; a failure is reported as a delivery failure, never a panic.
+    config: Result<Arc<ClientConfig>, String>,
 }
 
 impl Default for DiscordWebhookClient {
@@ -166,18 +166,22 @@ impl DiscordWebhookClient {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .expect("failed to build TLS versions")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        Self {
-            config: Arc::new(config),
-        }
+            .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
+            .map(Arc::new)
+            .map_err(|error| format!("could not initialise Discord TLS: {error}"));
+        Self { config }
     }
 }
 
 impl DiscordSender for DiscordWebhookClient {
     fn send(&self, request: WebhookRequest) -> WebhookFuture {
-        let config = self.config.clone();
+        let config = match &self.config {
+            Ok(config) => config.clone(),
+            Err(error) => {
+                let message = format!("Discord notifications unavailable: {error}");
+                return Box::pin(async move { WebhookResult::failure(message) });
+            }
+        };
         Box::pin(async move {
             let Some(target) = parse_discord_webhook_url(&request.url) else {
                 return WebhookResult::failure("Enter a valid Discord webhook URL.");

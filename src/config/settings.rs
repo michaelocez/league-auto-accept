@@ -1,8 +1,6 @@
 //! Application settings: schema, defaults, normalisation, merge and migration.
 //!
-//! Ported from the reference implementation (`Electron V1/src/shared/settings.ts` and
-//! `src/shared/contracts.ts`). The schema and semantics are preserved; the Rust rewrite owns its
-//! own persistence format (decision A9), while normalisation still understands the legacy
+//! Persistence has its own format, while normalisation still understands the legacy
 //! `schemaVersion:1` `discordUserIds` array so an existing settings file can be migrated.
 
 use serde::{Deserialize, Serialize};
@@ -232,7 +230,7 @@ fn push_mention(output: &mut Vec<DiscordMention>, id: &str, nickname: &str) {
     });
 }
 
-/// A Discord user ID is 17–20 ASCII digits (matches the reference validation).
+/// A Discord user ID is 17–20 ASCII digits.
 pub fn is_valid_discord_id(value: &str) -> bool {
     let len = value.len();
     (17..=20).contains(&len) && value.bytes().all(|byte| byte.is_ascii_digit())

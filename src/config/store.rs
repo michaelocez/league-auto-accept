@@ -1,8 +1,7 @@
 //! Settings persistence: atomic load/save with an encrypted webhook secret.
 //!
-//! Ported from the reference implementation (`Electron V1/src/main/settings-store.ts`). Writes are
-//! atomic (temp file + rename), corrupt files recover to defaults, and the webhook secret is stored
-//! as `{protection, value}` separate from the plain settings.
+//! Writes are atomic (temp file + rename), corrupt files recover to defaults, and the webhook
+//! secret is stored as `{protection, value}` separate from the plain settings.
 
 use std::path::{Path, PathBuf};
 

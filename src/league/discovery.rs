@@ -1,6 +1,5 @@
 //! League Client installation discovery.
 //!
-//! Ported from the reference implementation (`Electron V1/src/main/lcu/client-locator.ts`).
 //! Discovery is filesystem-based: installation directories are found from Riot's metadata
 //! (`%ProgramData%\Riot Games\Metadata`) plus a conventional fallback path, and a running
 //! client is signalled by the presence of its `lockfile`.
@@ -9,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use super::lockfile::{parse_lockfile, LcuCredentials, MAX_LOCKFILE_BYTES};
 
-/// The reference implementation refuses to read product-settings files larger than this.
+/// Product-settings files larger than this are not read.
 pub const MAX_METADATA_BYTES: u64 = 256 * 1024;
 const MAX_PATH_LEN: usize = 4096;
 
@@ -121,8 +120,7 @@ fn normalise_path(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
     let trimmed = raw.trim().trim_matches('"').to_string();
     // Riot's product_settings.yaml writes forward slashes; the fallback path uses backslashes.
-    // Normalise separators so the same installation de-duplicates on Windows (as `path.resolve()`
-    // does in the reference implementation).
+    // Normalise separators so the same installation de-duplicates on Windows.
     #[cfg(windows)]
     let trimmed = trimmed.replace('/', "\\");
     PathBuf::from(trimmed)

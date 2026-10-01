@@ -1,12 +1,10 @@
 //! Headless League service: discovery → verify → connect → observe → state machine → accept.
 //!
-//! Ported from the reference main-process wiring (`Electron V1/src/main/main.ts` plus
-//! `lcu-controller.ts` and `auto-accept-controller.ts`). UI-independent: it reports through a
-//! `ServiceEvent` channel and never touches GPUI or the app layer. Discord stays downstream
-//! (lifecycle events are plain data).
+//! UI-independent: it reports through a `ServiceEvent` channel and never touches GPUI or the app
+//! layer. Discord stays downstream (lifecycle events are plain data).
 //!
-//! Behaviour preserved: 3-second discovery/reconnect polling, credential-change detection,
-//! one accept request at a time, bounded retry, cancellation, and generation-guarded staleness.
+//! Behaviour: 3-second discovery/reconnect polling, credential-change detection, one accept
+//! request at a time, bounded retry, cancellation, and generation-guarded staleness.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

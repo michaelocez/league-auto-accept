@@ -1,9 +1,7 @@
 //! Secret storage for the Discord webhook URL.
 //!
-//! Ported from the reference implementation (`Electron V1/src/main/electron-secret-codec.ts`).
 //! The webhook URL is the only secret. On Windows it is protected with DPAPI
-//! (`CryptProtectData`), matching Electron's `safeStorage`; if protection fails it falls back to
-//! a plainly-stored value, exactly as the reference does when OS encryption is unavailable.
+//! (`CryptProtectData`); if protection is unavailable it falls back to a plainly-stored value.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};

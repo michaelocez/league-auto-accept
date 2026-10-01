@@ -1,6 +1,5 @@
 //! Discord notification service — strictly downstream of Auto Accept.
 //!
-//! Ported from the reference implementation (`Electron V1/src/main/discord-notification-service.ts`).
 //! Delivery is fire-and-forget: `notification_for` returns a future the caller spawns and never
 //! awaits on the accept path, so a notification can never delay, retry, or change acceptance.
 

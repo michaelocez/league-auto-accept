@@ -22,7 +22,8 @@ service or driver, no telemetry, and no remote content in the UI.
 
 ## Download and run
 
-1. Download `league-auto-accept.exe` from the [latest release](../../releases/latest).
+1. Download `league-auto-accept.exe` from the
+   [latest release](https://github.com/michaelocez/league-auto-accept/releases/latest).
 2. Put it anywhere and run it. That's it.
 
 It is **portable**: a single self-contained executable (statically linked C runtime, embedded
@@ -62,7 +63,6 @@ That's it for running the release build. No League installation is required to b
 ### Building from source
 
 - Rust (stable) with the MSVC toolchain and Visual Studio Build Tools (`link.exe`).
-- CMake on `PATH` (used by the TLS backend's C sources).
 
 ## Development
 

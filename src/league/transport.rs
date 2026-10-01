@@ -1,12 +1,11 @@
 //! Concrete LCU transports: loopback HTTPS REST and a strict WebSocket event socket.
 //!
-//! Ported from the reference implementation (`Electron V1/src/main/lcu/lcu-client.ts` and
-//! `lcu-event-socket.ts`). The LCU serves a self-signed certificate on `127.0.0.1`, so
-//! certificate verification is intentionally disabled — but only for this loopback connection;
-//! authentication is still required via HTTP Basic and the WebSocket handshake is verified.
+//! The LCU serves a self-signed certificate on `127.0.0.1`, so certificate verification is
+//! intentionally disabled — but only for this loopback connection; authentication is still
+//! required via HTTP Basic and the WebSocket handshake is verified.
 //!
 //! The WebSocket path uses the project's strict `WebSocketFrameDecoder` rather than a generic
-//! client, preserving the reference's malformed-frame handling.
+//! client, which gives explicit malformed-frame handling.
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -67,7 +66,7 @@ impl std::fmt::Display for TransportError {
 impl std::error::Error for TransportError {}
 
 /// Certificate verifier that accepts any certificate. Only ever used for the LCU loopback
-/// connection, which serves a self-signed certificate (the reference uses `rejectUnauthorized:false`).
+/// connection, which serves a self-signed certificate.
 #[derive(Debug)]
 struct AcceptAnyCertificate {
     provider: Arc<rustls::crypto::CryptoProvider>,
@@ -110,15 +109,15 @@ impl ServerCertVerifier for AcceptAnyCertificate {
     }
 }
 
-fn tls_config() -> Arc<ClientConfig> {
+fn tls_config() -> Result<Arc<ClientConfig>, TransportError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
-        .expect("failed to build TLS protocol versions")
+        .map_err(|error| TransportError::Tls(error.to_string()))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAnyCertificate { provider }))
         .with_no_client_auth();
-    Arc::new(config)
+    Ok(Arc::new(config))
 }
 
 fn authorization(credentials: &LcuCredentials) -> String {
@@ -130,14 +129,15 @@ fn authorization(credentials: &LcuCredentials) -> String {
 /// Loopback HTTPS REST client for the LCU.
 pub struct LcuRestClient {
     credentials: LcuCredentials,
-    config: Arc<ClientConfig>,
+    /// TLS setup is fallible; a failure is surfaced on the first request rather than panicking.
+    config: Result<Arc<ClientConfig>, String>,
 }
 
 impl LcuRestClient {
     pub fn new(credentials: LcuCredentials) -> Self {
         Self {
             credentials,
-            config: tls_config(),
+            config: tls_config().map_err(|error| error.to_string()),
         }
     }
 
@@ -181,10 +181,15 @@ impl LcuRestClient {
         &self,
         request: &LcuRequest,
     ) -> Result<serde_json::Value, TransportError> {
+        let config = self
+            .config
+            .as_ref()
+            .map_err(|error| TransportError::Tls(error.clone()))?
+            .clone();
         let tcp = TcpStream::connect((Ipv4Addr::LOCALHOST, self.credentials.port))
             .await
             .map_err(|error| TransportError::Io(error.to_string()))?;
-        let connector = TlsConnector::from(self.config.clone());
+        let connector = TlsConnector::from(config);
         let server_name = ServerName::try_from("127.0.0.1")
             .map_err(|error| TransportError::Tls(error.to_string()))?;
         let mut tls = connector
@@ -261,14 +266,15 @@ impl LcuRestClient {
 /// Loopback TLS WebSocket client for LCU events.
 pub struct LcuEventSocket {
     credentials: LcuCredentials,
-    config: Arc<ClientConfig>,
+    /// TLS setup is fallible; a failure is surfaced on connect rather than panicking.
+    config: Result<Arc<ClientConfig>, String>,
 }
 
 impl LcuEventSocket {
     pub fn new(credentials: LcuCredentials) -> Self {
         Self {
             credentials,
-            config: tls_config(),
+            config: tls_config().map_err(|error| error.to_string()),
         }
     }
 
@@ -279,12 +285,17 @@ impl LcuEventSocket {
     }
 
     async fn connect_inner(&self) -> Result<LcuEventConnection, TransportError> {
+        let config = self
+            .config
+            .as_ref()
+            .map_err(|error| TransportError::Tls(error.clone()))?
+            .clone();
         let tcp = TcpStream::connect((Ipv4Addr::LOCALHOST, self.credentials.port))
             .await
             .map_err(|error| TransportError::Io(error.to_string()))?;
         tcp.set_nodelay(true)
             .map_err(|error| TransportError::Io(error.to_string()))?;
-        let connector = TlsConnector::from(self.config.clone());
+        let connector = TlsConnector::from(config);
         let server_name = ServerName::try_from("127.0.0.1")
             .map_err(|error| TransportError::Tls(error.to_string()))?;
         let mut tls = connector
