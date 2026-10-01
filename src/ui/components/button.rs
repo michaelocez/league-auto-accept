@@ -18,8 +18,6 @@ pub enum ButtonVariant {
     Secondary,
     /// Transparent until hovered — low-emphasis actions.
     Ghost,
-    /// Filled danger — destructive actions.
-    Danger,
 }
 
 /// Size of a button.
@@ -95,7 +93,6 @@ impl RenderOnce for Button {
             ButtonVariant::Primary => (t.accent, t.accent_fg, t.accent_hover),
             ButtonVariant::Secondary => (t.surface_hover, t.text, t.surface_active),
             ButtonVariant::Ghost => (t.surface.with_alpha(0.0), t.text_muted, t.surface_hover),
-            ButtonVariant::Danger => (t.danger, t.accent_fg, t.danger),
         };
         let (px_x, py_y) = match self.size {
             ButtonSize::Sm => (theme::space_3(), theme::space_1()),

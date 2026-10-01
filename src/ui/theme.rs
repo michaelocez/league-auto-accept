@@ -4,8 +4,8 @@
 //! authored, never an inversion of dark). The active set is selected by the [`Appearance`] global,
 //! which the UI reads via `cx.global::<Appearance>()` and which is written by [`set_appearance`].
 //!
-//! The palette direction (neutral layered surfaces, a restrained indigo accent, colour reserved for
-//! state) is original to this project; no third-party visual identity is copied.
+//! The palette direction (neutral layered surfaces, a monochrome accent, colour reserved for state)
+//! is original to this project; no third-party visual identity is copied.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -29,14 +29,6 @@ impl Appearance {
             Appearance::Light => Theme::light(),
         }
     }
-
-    /// Toggles between light and dark.
-    pub fn toggled(self) -> Self {
-        match self {
-            Appearance::Dark => Appearance::Light,
-            Appearance::Light => Appearance::Dark,
-        }
-    }
 }
 
 /// The fully resolved colour tokens for one appearance.
@@ -56,8 +48,6 @@ pub struct Theme {
     pub surface_hover: Rgba,
     /// Surface while pressed or selected.
     pub surface_active: Rgba,
-    /// Floating/overlay surface (menus, popovers).
-    pub overlay: Rgba,
     /// Hairline separator.
     pub border: Rgba,
     /// Stronger border for emphasis/focus.
@@ -82,8 +72,6 @@ pub struct Theme {
     pub warning: Rgba,
     /// Danger/error state.
     pub danger: Rgba,
-    /// Focus ring colour.
-    pub focus_ring: Rgba,
 }
 
 impl Theme {
@@ -104,7 +92,6 @@ impl Theme {
             surface: rgb(0x161619),
             surface_hover: rgb(0x1e1e22),
             surface_active: rgb(0x26262b),
-            overlay: rgb(0x1c1c20),
             border: rgb(0x242428),
             border_strong: rgb(0x36363c),
             text: rgb(0xf4f4f5),
@@ -118,7 +105,6 @@ impl Theme {
             success: rgb(0x63c08d),
             warning: rgb(0xd2ab60),
             danger: rgb(0xdd8080),
-            focus_ring: rgb(0xd0d0d6),
         }
     }
 
@@ -131,7 +117,6 @@ impl Theme {
             surface: rgb(0xffffff),
             surface_hover: rgb(0xf0f0f2),
             surface_active: rgb(0xe6e6ea),
-            overlay: rgb(0xffffff),
             border: rgb(0xe2e2e5),
             border_strong: rgb(0xcfcfd4),
             text: rgb(0x1b1b1e),
@@ -145,7 +130,6 @@ impl Theme {
             success: rgb(0x2f9e63),
             warning: rgb(0xa8761f),
             danger: rgb(0xc94a4a),
-            focus_ring: rgb(0x1c1c1f),
         }
     }
 }
@@ -174,76 +158,12 @@ pub fn current() -> Appearance {
     }
 }
 
-/// The active resolved token set.
-pub fn theme() -> Theme {
-    current().theme()
-}
-
-// The process-local mirror lets transitional free-function accessors below work before every view
-// reads the `Appearance` global directly. `set_appearance` is the only writer, so it cannot drift.
+// The process-local mirror lets `current()` work outside a GPUI context. `set_appearance` is the
+// only writer, so it cannot drift from the `Appearance` global.
 static ACTIVE: AtomicU8 = AtomicU8::new(Appearance::Dark as u8);
-
-// --- Transitional colour accessors (mapped onto the token roles above) ------------------------
-// These keep existing screens compiling while the component/theme migration lands; new code should
-// read `cx.global::<Appearance>().theme()` (or a passed-in `Theme`).
-
-pub fn background() -> Rgba {
-    theme().bg
-}
-
-pub fn surface() -> Rgba {
-    theme().surface
-}
-
-pub fn surface_raised() -> Rgba {
-    theme().surface_hover
-}
-
-pub fn border() -> Rgba {
-    theme().border
-}
-
-pub fn border_strong() -> Rgba {
-    theme().border_strong
-}
-
-pub fn border_focus() -> Rgba {
-    theme().accent
-}
-
-pub fn text_primary() -> Rgba {
-    theme().text
-}
-
-pub fn text_secondary() -> Rgba {
-    theme().text_muted
-}
-
-pub fn text_muted() -> Rgba {
-    theme().text_faint
-}
-
-pub fn accent() -> Rgba {
-    theme().accent
-}
-
-pub fn success() -> Rgba {
-    theme().success
-}
-
-pub fn warning() -> Rgba {
-    theme().warning
-}
-
-pub fn danger() -> Rgba {
-    theme().danger
-}
 
 // --- Spacing scale (4px base) ----------------------------------------------------------------
 
-pub fn space_0_5() -> Pixels {
-    px(2.0)
-}
 pub fn space_1() -> Pixels {
     px(4.0)
 }
@@ -265,15 +185,9 @@ pub fn space_6() -> Pixels {
 pub fn space_8() -> Pixels {
     px(32.0)
 }
-pub fn space_10() -> Pixels {
-    px(40.0)
-}
 
 // --- Corner radii ----------------------------------------------------------------------------
 
-pub fn radius_xs() -> Pixels {
-    px(4.0)
-}
 pub fn radius_sm() -> Pixels {
     px(6.0)
 }
@@ -282,9 +196,6 @@ pub fn radius_md() -> Pixels {
 }
 pub fn radius_lg() -> Pixels {
     px(12.0)
-}
-pub fn radius_xl() -> Pixels {
-    px(16.0)
 }
 
 // --- Type scale ------------------------------------------------------------------------------

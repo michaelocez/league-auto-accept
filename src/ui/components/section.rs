@@ -35,11 +35,6 @@ impl Section {
         self.subtitle = Some(subtitle.into());
         self
     }
-
-    /// Convenience: returns a [`Divider`](super::Divider) to separate this section from the next.
-    pub fn divider() -> super::Divider {
-        super::Divider::horizontal()
-    }
 }
 
 impl Default for Section {

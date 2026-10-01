@@ -19,7 +19,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Observable output of the service. The app maps these onto application state / notifications.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceEvent {
-    Connection { connected: bool, message: String },
+    Connection { connected: bool },
     ReadyCheck { status: Status, message: String },
     Lifecycle(Lifecycle),
 }
@@ -79,27 +79,23 @@ impl LeagueService {
 
     async fn run_once(&mut self) {
         let Some(credentials) = self.locator.find_running_client() else {
-            self.disconnect("Open the League Client to connect.");
+            self.disconnect();
             return;
         };
 
-        self.emit(ServiceEvent::Connection {
-            connected: false,
-            message: "Authenticating with the League Client…".into(),
-        });
+        self.emit(ServiceEvent::Connection { connected: false });
 
         let rest = Arc::new(LcuRestClient::new(credentials.clone()));
         if rest.verify().await.is_err() {
-            self.disconnect("League Client was found but authentication failed; retrying…");
+            self.disconnect();
             return;
         }
 
         let mut socket = match LcuEventSocket::new(credentials.clone()).connect().await {
             Ok(socket) => socket,
             Err(error) => {
-                self.disconnect(&format!(
-                    "League Client event connection failed ({error}); retrying…"
-                ));
+                log::warn!("LCU event connection failed: {error}");
+                self.disconnect();
                 return;
             }
         };
@@ -111,10 +107,7 @@ impl LeagueService {
 
         self.bootstrap(&rest, &input_tx).await;
 
-        self.emit(ServiceEvent::Connection {
-            connected: true,
-            message: "League Client connected.".into(),
-        });
+        self.emit(ServiceEvent::Connection { connected: true });
 
         let mut poll = tokio::time::interval(POLL_INTERVAL);
         poll.tick().await; // consume the immediate first tick
@@ -150,10 +143,7 @@ impl LeagueService {
                             }
                         }
                         Ok(SocketEvent::Closed) | Err(_) => {
-                            self.emit(ServiceEvent::Connection {
-                                connected: false,
-                                message: "League Client event connection closed; reconnecting…".into(),
-                            });
+                            self.emit(ServiceEvent::Connection { connected: false });
                             break;
                         }
                     }
@@ -162,17 +152,11 @@ impl LeagueService {
                     self.sync_enabled(Some(&rest), Some(&input_tx));
                     match self.locator.find_running_client() {
                         None => {
-                            self.emit(ServiceEvent::Connection {
-                                connected: false,
-                                message: "League Client closed; reconnecting…".into(),
-                            });
+                            self.emit(ServiceEvent::Connection { connected: false });
                             break;
                         }
                         Some(next) if next.signature() != credentials.signature() => {
-                            self.emit(ServiceEvent::Connection {
-                                connected: false,
-                                message: "League Client restarted; reconnecting…".into(),
-                            });
+                            self.emit(ServiceEvent::Connection { connected: false });
                             break;
                         }
                         Some(_) => {}
@@ -221,14 +205,11 @@ impl LeagueService {
         }
     }
 
-    fn disconnect(&mut self, message: &str) {
+    fn disconnect(&mut self) {
         let effects = self.machine.on_connection(false);
         // No REST client is needed to unwind a connection; effects here are only state/idle.
         self.handle_effects(effects, None, None);
-        self.emit(ServiceEvent::Connection {
-            connected: false,
-            message: message.into(),
-        });
+        self.emit(ServiceEvent::Connection { connected: false });
     }
 
     fn handle_effects(

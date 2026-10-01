@@ -141,20 +141,20 @@ impl Dashboard {
     }
 }
 
-pub(crate) fn status_color(summary: &str) -> Rgba {
+pub(crate) fn status_color(summary: &str, t: &Theme) -> Rgba {
     match summary {
-        "Active" => theme::success(),
-        "Connecting" => theme::warning(),
-        "League offline" => theme::danger(),
-        _ => theme::text_secondary(),
+        "Active" => t.success,
+        "Connecting" => t.warning,
+        "League offline" => t.danger,
+        _ => t.text_muted,
     }
 }
 
-fn activity_color(kind: ActivityKind) -> Rgba {
+fn activity_color(kind: ActivityKind, t: &Theme) -> Rgba {
     match kind {
-        ActivityKind::Info => theme::text_secondary(),
-        ActivityKind::Accepted => theme::success(),
-        ActivityKind::Warning => theme::danger(),
+        ActivityKind::Info => t.text_muted,
+        ActivityKind::Accepted => t.success,
+        ActivityKind::Warning => t.danger,
     }
 }
 
@@ -169,6 +169,7 @@ impl Dashboard {
         setting: ToggleSetting,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let t = Theme::of(cx);
         let (title, subtitle) = (title.to_string(), subtitle.to_string());
         div()
             .flex()
@@ -181,12 +182,12 @@ impl Dashboard {
                     .flex_col()
                     .gap(theme::space_1())
                     .text_size(theme::text_body())
-                    .child(div().text_color(theme::text_primary()).child(title))
+                    .child(div().text_color(t.text).child(title))
                     .when(!subtitle.is_empty(), |this| {
                         this.child(
                             div()
                                 .text_size(theme::text_small())
-                                .text_color(theme::text_secondary())
+                                .text_color(t.text_muted)
                                 .child(subtitle),
                         )
                     }),
@@ -326,7 +327,7 @@ impl Dashboard {
                                 div()
                                     .size(px(8.0))
                                     .rounded_full()
-                                    .bg(activity_color(item.kind)),
+                                    .bg(activity_color(item.kind, t)),
                             )
                             .child(div().w(px(1.0)).flex_1().bg(bottom)),
                     )
@@ -375,14 +376,14 @@ impl Dashboard {
             String::new()
         };
         let (test_message, test_color) = if testing {
-            ("Sending test webhook…".to_string(), theme::text_secondary())
+            ("Sending test webhook…".to_string(), t.text_muted)
         } else {
             match &self.state.webhook_test {
-                Some(result) if result.ok => (result.message.clone(), theme::success()),
-                Some(result) => (result.message.clone(), theme::danger()),
+                Some(result) if result.ok => (result.message.clone(), t.success),
+                Some(result) => (result.message.clone(), t.danger),
                 None => (
                     "Uses the saved webhook URL and configured mentions.".to_string(),
-                    theme::text_secondary(),
+                    t.text_muted,
                 ),
             }
         };
@@ -793,7 +794,7 @@ impl Render for Dashboard {
         let sidebar = Sidebar::new(
             screen,
             summary,
-            status_color(summary),
+            status_color(summary, &t),
             self.state.connection.label(),
             move |target, _event, _window, app| {
                 nav_view.update(app, |this, cx| {

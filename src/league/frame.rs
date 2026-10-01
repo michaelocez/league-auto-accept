@@ -195,11 +195,6 @@ pub fn encode_masked(opcode: u8, payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
     out
 }
 
-/// Encodes a masked client text frame (the LCU subscription is the only client text frame).
-pub fn encode_masked_text(payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
-    encode_masked(0x1, payload, mask)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,12 +250,12 @@ mod tests {
 
     #[test]
     fn encodes_a_masked_client_frame() {
-        let frame = encode_masked_text(b"hello", [0, 0, 0, 0]);
+        let frame = encode_masked(0x1, b"hello", [0, 0, 0, 0]);
         assert_eq!(
             frame,
             vec![0x81, 0x85, 0, 0, 0, 0, b'h', b'e', b'l', b'l', b'o']
         );
-        let masked = encode_masked_text(b"hi", [1, 2, 3, 4]);
+        let masked = encode_masked(0x1, b"hi", [1, 2, 3, 4]);
         assert_eq!(masked[1] & 0x80, 0x80);
         assert_eq!(masked[6], b'h' ^ 1);
         assert_eq!(masked[7], b'i' ^ 2);

@@ -6,7 +6,7 @@ use gpui::{div, px, AnyElement, App, Div, IntoElement, Rgba, StyleRefinement, Wi
 
 use crate::ui::theme::{self, Theme};
 
-/// Visual weight of a surface, from flat grouping to a floating layer.
+/// Visual weight of a surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Elevation {
     /// A flat grouping surface sitting on the page background.
@@ -14,8 +14,6 @@ pub enum Elevation {
     /// A slightly lifted surface — the default for grouped content.
     #[default]
     Raised,
-    /// A floating surface for overlays and popovers.
-    Overlay,
 }
 
 /// A rounded, hairline-bordered container with a token-driven background.
@@ -83,7 +81,6 @@ impl RenderOnce for Surface {
         let background = self.bg_override.unwrap_or(match self.elevation {
             Elevation::Base => t.surface,
             Elevation::Raised => t.bg_elevated,
-            Elevation::Overlay => t.overlay,
         });
         self.base
             .flex()
@@ -98,53 +95,29 @@ impl RenderOnce for Surface {
     }
 }
 
-/// Orientation of a [`Divider`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Orientation {
-    #[default]
-    Horizontal,
-    Vertical,
-}
-
-/// A one-pixel hairline separator.
+/// A one-pixel horizontal hairline separator.
 #[derive(IntoElement)]
-pub struct Divider {
-    orientation: Orientation,
-}
+pub struct Divider;
 
 impl Divider {
     pub fn new() -> Self {
-        Self {
-            orientation: Orientation::Horizontal,
-        }
-    }
-
-    pub fn orientation(mut self, orientation: Orientation) -> Self {
-        self.orientation = orientation;
-        self
+        Self
     }
 
     pub fn horizontal() -> Self {
-        Self::new()
-    }
-
-    pub fn vertical() -> Self {
-        Self::new().orientation(Orientation::Vertical)
+        Self
     }
 }
 
 impl Default for Divider {
     fn default() -> Self {
-        Self::new()
+        Self
     }
 }
 
 impl RenderOnce for Divider {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = Theme::of(cx);
-        match self.orientation {
-            Orientation::Horizontal => div().w_full().h(px(1.0)).bg(t.border),
-            Orientation::Vertical => div().h_full().w(px(1.0)).bg(t.border),
-        }
+        div().w_full().h(px(1.0)).bg(t.border)
     }
 }

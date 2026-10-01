@@ -64,7 +64,7 @@ impl Render for TrayPopup {
         let summary = dashboard.state.summary();
         let auto_accept = dashboard.state.settings.auto_accept_enabled;
         let connection = dashboard.state.connection.label();
-        let status = status_color(summary);
+        let status = status_color(summary, &t);
 
         let toggle_tx = self.tx.clone();
         let open_tx = self.tx.clone();

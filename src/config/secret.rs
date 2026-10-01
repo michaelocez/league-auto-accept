@@ -13,12 +13,6 @@ pub struct StoredSecret {
     pub value: String,
 }
 
-impl StoredSecret {
-    pub fn is_plain(&self) -> bool {
-        self.protection == "plain"
-    }
-}
-
 /// Encodes/decodes the webhook secret. Injectable so tests can use a deterministic codec.
 pub trait SecretCodec: Send + Sync {
     fn encode(&self, value: &str) -> StoredSecret;
@@ -172,7 +166,7 @@ mod tests {
     fn plain_codec_round_trips() {
         let codec = PlainSecretCodec;
         let stored = codec.encode(SAMPLE);
-        assert!(stored.is_plain());
+        assert_eq!(stored.protection, "plain");
         assert_eq!(codec.decode(&stored), SAMPLE);
     }
 
