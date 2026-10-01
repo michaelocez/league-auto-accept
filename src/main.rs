@@ -224,7 +224,13 @@ fn open_tray_popup(
         },
         move |window, cx| cx.new(|cx| TrayPopup::new(dashboard, tx, window, cx)),
     ) {
-        Ok(handle) => Some(handle),
+        Ok(handle) => {
+            // Borderless popups are square with no shadow by default; ask DWM to round + shadow it.
+            let _ = handle.update(app, |_view, window, _cx| {
+                league_auto_accept::platform::popup::apply_rounded_shadow(window);
+            });
+            Some(handle)
+        }
         Err(error) => {
             log::error!("failed to open tray popup: {error}");
             None
