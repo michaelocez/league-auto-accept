@@ -1,0 +1,59 @@
+name: Release
+
+# Builds the portable Windows executable and attaches it to the GitHub release when a version tag
+# (e.g. v1.0.0) is pushed. The static CRT + embedded icon come from the committed .cargo/config.toml
+# and build.rs, so CI produces the same self-contained artifact as a local `cargo build --release`.
+#
+# Third-party actions are pinned to immutable commit SHAs for supply-chain hardening.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust (stable, MSVC)
+        # Pinned to a SHA, so the toolchain must be given explicitly (a SHA conveys no version).
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Test
+        run: cargo test --locked --release
+
+      - name: Build (release)
+        run: cargo build --locked --release
+
+      - name: Verify the executable was produced
+        shell: pwsh
+        run: |
+          $exe = "target/release/league-auto-accept.exe"
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            Write-Error "Release build did not produce the expected executable: $exe"
+            exit 1
+          }
+          Get-Item -LiteralPath $exe | Select-Object FullName, Length
+
+      - name: Attach executable to the release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: target/release/league-auto-accept.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true
