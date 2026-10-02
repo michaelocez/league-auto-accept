@@ -241,4 +241,22 @@ mod tests {
             .unwrap();
         assert_eq!(reloaded.discord_mentions[0].nickname, "Michael");
     }
+
+    #[test]
+    fn persists_theme_and_backdrop_choices() {
+        use crate::config::settings::{BackdropMode, ThemeMode};
+
+        let root = tempdir().unwrap();
+        let mut store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+        store.load().unwrap();
+        store
+            .update(&json!({ "themeMode": "light", "windowBackdrop": "mica" }))
+            .unwrap();
+
+        let reloaded = SettingsStore::new(root.path(), Box::new(FakeCodec))
+            .load()
+            .unwrap();
+        assert_eq!(reloaded.theme_mode, ThemeMode::Light);
+        assert_eq!(reloaded.window_backdrop, BackdropMode::Mica);
+    }
 }

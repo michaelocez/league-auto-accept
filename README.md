@@ -15,9 +15,13 @@ service or driver, no telemetry, and no remote content in the UI.
   check, with bounded retries, cancellation, and reconnect handling.
 - **Discord notifications**: webhook alerts for queue popped,
   auto-accepted, and game-started, with optional `{mentions}` of up to five Discord users.
+- **Appearance**: **Dark** and **Light** themes, plus a window backdrop of **Opaque**,
+  **Mica** (subtle, samples the desktop wallpaper) or **Acrylic** (blurs what is behind the window
+  in real time). Mica/Acrylic require Windows 11; elsewhere the window stays opaque.
 - **Always-present system tray**: live status, an Auto Accept
   toggle, Open, and Quit.
-- **Settings** persist per user (Auto Accept state, minimize-to-tray, Discord config, mentions).
+- **Settings** persist per user (Auto Accept state, theme, window backdrop, minimize-to-tray,
+  Discord config, mentions).
 - **Single instance**; minimize/close-to-tray is configurable.
 
 ## Download and run
@@ -42,6 +46,9 @@ creates is its own per-user settings file (see [Configuration](#configuration)).
 - **Notifications**: open the Notifications page, enable Discord notifications, paste a Discord
   webhook URL, optionally add people to mention (nickname + Discord user ID), and use **Test
   Webhook** to verify.
+- **Appearance**: on the Settings page choose **Dark** or **Light**, and a window backdrop —
+  **Opaque** (default), **Mica**, or **Acrylic**. Your choices are saved and restored on next
+  launch.
 
 ## Configuration
 
@@ -52,7 +59,8 @@ Settings are stored as JSON at:
 ```
 
 The only secret is the Discord webhook URL; it is encrypted with the OS codec where available and
-is never logged or exposed to the UI layer.
+is never logged or exposed to the UI layer. Your theme and window backdrop are stored here too, so
+they are restored on next launch.
 
 ## Requirements
 

@@ -23,7 +23,7 @@ use league_auto_accept::config::store::{default_settings_directory, SettingsStor
 use league_auto_accept::platform::tray::TrayCommand;
 use league_auto_accept::platform::{single_instance, tray, window as platform_window};
 use league_auto_accept::ui::dashboard::Dashboard;
-use league_auto_accept::ui::theme::{self, Appearance};
+use league_auto_accept::ui::theme;
 use league_auto_accept::ui::tray_popup::TrayPopup;
 
 fn main() {
@@ -72,8 +72,9 @@ fn main() {
         gpui::init(cx);
 
         // Establish the single source of truth for the active visual appearance before any view
-        // renders (Light/Dark is changed from the Settings page).
-        theme::set_appearance(cx, Appearance::Dark);
+        // renders. Both are persisted, so a restart keeps the user's chosen theme and backdrop.
+        theme::set_appearance(cx, settings.theme_mode.into());
+        theme::set_treatment(cx, settings.window_backdrop.into());
 
         // Capture the native window handle once (pure Win32 hide/show; no re-entrant GPUI borrows).
         let hwnd_slot = Arc::new(AtomicIsize::new(0));
@@ -85,7 +86,7 @@ fn main() {
             let notifications = notifications.clone();
             let settings = settings.clone();
             let bounds = Bounds::centered(None, size(px(880.0), px(600.0)), cx);
-            let (_handle, view) = gpui::open_window(
+            let (handle, view) = gpui::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(720.0), px(520.0))),
@@ -95,6 +96,10 @@ fn main() {
                         appears_transparent: true,
                         traffic_light_position: None,
                     }),
+                    window_background: theme::window_background(
+                        theme::current(),
+                        theme::current_treatment(),
+                    ),
                     ..Default::default()
                 },
                 cx,
@@ -143,6 +148,20 @@ fn main() {
                 },
             )
             .expect("failed to open window");
+            // Round the window to match the native Windows 11 look; best-effort on older builds.
+            let _ = handle.update(cx, |_view, window, _cx| {
+                league_auto_accept::platform::popup::apply_rounded_corners(window);
+                // Re-apply a persisted Mica/Acrylic backdrop (the window was created with the
+                // matching GPUI background, but the DWM backdrop type is set explicitly).
+                let treatment = theme::current_treatment();
+                if treatment != theme::SurfaceTreatment::Opaque {
+                    let _ = league_auto_accept::platform::glass::apply(
+                        window,
+                        theme::current(),
+                        treatment,
+                    );
+                }
+            });
             view
         };
 
@@ -222,6 +241,7 @@ fn open_tray_popup(
             is_movable: false,
             is_resizable: false,
             is_minimizable: false,
+            // Created opaque; `glass::apply` enables the backdrop (or falls back) when one is active.
             window_background: WindowBackgroundAppearance::Opaque,
             ..Default::default()
         },
@@ -231,6 +251,13 @@ fn open_tray_popup(
             // Borderless popups are square with no shadow by default; ask DWM to round + shadow it.
             let _ = handle.update(app, |_view, window, _cx| {
                 league_auto_accept::platform::popup::apply_rounded_shadow(window);
+                if theme::current_treatment() != theme::SurfaceTreatment::Opaque {
+                    let _ = league_auto_accept::platform::glass::apply(
+                        window,
+                        theme::current(),
+                        theme::current_treatment(),
+                    );
+                }
             });
             Some(handle)
         }

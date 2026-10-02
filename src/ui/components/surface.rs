@@ -2,7 +2,7 @@
 
 use gpui::base::StyledExt as _;
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, App, Div, IntoElement, Rgba, StyleRefinement, Window};
+use gpui::{div, px, AnyElement, App, Div, IntoElement, StyleRefinement, Window};
 
 use crate::ui::theme::{self, Theme};
 
@@ -22,7 +22,6 @@ pub struct Surface {
     base: Div,
     style: StyleRefinement,
     elevation: Elevation,
-    bg_override: Option<Rgba>,
     padded: bool,
     children: Vec<AnyElement>,
 }
@@ -33,7 +32,6 @@ impl Surface {
             base: div(),
             style: StyleRefinement::default(),
             elevation: Elevation::Raised,
-            bg_override: None,
             padded: true,
             children: Vec::new(),
         }
@@ -41,12 +39,6 @@ impl Surface {
 
     pub fn elevation(mut self, elevation: Elevation) -> Self {
         self.elevation = elevation;
-        self
-    }
-
-    /// Overrides the token background (e.g. an accent-tinted hero surface).
-    pub fn background(mut self, color: Rgba) -> Self {
-        self.bg_override = Some(color);
         self
     }
 
@@ -78,10 +70,10 @@ impl ParentElement for Surface {
 impl RenderOnce for Surface {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = Theme::of(cx);
-        let background = self.bg_override.unwrap_or(match self.elevation {
+        let background = match self.elevation {
             Elevation::Base => t.surface,
             Elevation::Raised => t.bg_elevated,
-        });
+        };
         self.base
             .flex()
             .flex_col()
@@ -100,17 +92,7 @@ impl RenderOnce for Surface {
 pub struct Divider;
 
 impl Divider {
-    pub fn new() -> Self {
-        Self
-    }
-
     pub fn horizontal() -> Self {
-        Self
-    }
-}
-
-impl Default for Divider {
-    fn default() -> Self {
         Self
     }
 }

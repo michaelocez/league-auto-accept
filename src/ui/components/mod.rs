@@ -5,13 +5,13 @@
 //! application logic.
 
 mod button;
-mod field;
-mod section;
+mod group;
+mod row;
 mod surface;
 mod toggle;
 
 pub use button::{Button, ButtonSize, ButtonVariant};
-pub use field::LabeledField;
-pub use section::Section;
+pub use group::SettingsGroup;
+pub use row::Row;
 pub use surface::{Divider, Elevation, Surface};
 pub use toggle::Toggle;

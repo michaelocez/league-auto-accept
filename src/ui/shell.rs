@@ -58,8 +58,8 @@ impl Default for TitleBar {
     }
 }
 
-/// The app mark: a small circle with a check, matching the application/tray icon identity. A faint
-/// ring keeps the circle legible on the dark title bar where the icon's `#18181b` would vanish.
+/// The app mark: a small circle with a check, matching the application/tray icon identity. Drawn
+/// from theme tokens so it stays legible on both the dark and light chrome.
 pub(crate) fn app_mark(t: &Theme) -> impl IntoElement {
     div()
         .flex()
@@ -68,14 +68,14 @@ pub(crate) fn app_mark(t: &Theme) -> impl IntoElement {
         .size(px(18.0))
         .flex_shrink_0()
         .rounded_full()
-        .bg(gpui::rgb(0x18181b))
+        .bg(t.surface_active)
         .border_1()
         .border_color(t.border_strong)
         .child(
             div()
-                .text_size(px(12.0))
+                .text_size(px(11.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(gpui::rgb(0xf4f4f5))
+                .text_color(t.text)
                 .child("\u{2713}"), // ✓
         )
 }
@@ -86,7 +86,7 @@ impl RenderOnce for TitleBar {
         div()
             .flex()
             .items_center()
-            .h(px(38.0))
+            .h(px(44.0))
             .w_full()
             .flex_shrink_0()
             .bg(t.sidebar_bg)
@@ -106,7 +106,7 @@ impl RenderOnce for TitleBar {
                     .child(
                         div()
                             .text_size(theme::text_small())
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(t.text)
                             .child("League Auto Accept"),
                     ),
@@ -144,7 +144,7 @@ fn control_button(
         .items_center()
         .justify_center()
         .w(px(46.0))
-        .h(px(38.0))
+        .h(px(44.0))
         .cursor_pointer()
         .text_size(px(11.0))
         .text_color(fg)
@@ -216,18 +216,13 @@ impl Sidebar {
 }
 
 fn nav_item(screen: Screen, active: bool, t: &Theme, on_nav: NavHandler) -> impl IntoElement {
-    let (bg, fg) = if active {
-        (t.accent_subtle, t.text)
-    } else {
-        (t.sidebar_bg, t.text_muted)
-    };
+    let fg = if active { t.text } else { t.text_muted };
     div()
         .id(match screen {
             Screen::AutoAccept => "nav-auto-accept",
             Screen::Notifications => "nav-notifications",
             Screen::Settings => "nav-settings",
         })
-        .relative()
         .flex()
         .items_center()
         .gap(theme::space_3())
@@ -235,21 +230,11 @@ fn nav_item(screen: Screen, active: bool, t: &Theme, on_nav: NavHandler) -> impl
         .py(theme::space_2())
         .rounded(theme::radius_md())
         .cursor_pointer()
-        .bg(bg)
         .text_color(fg)
         .when(active, |this| {
-            this.child(
-                div()
-                    .absolute()
-                    .left(px(0.0))
-                    .top(px(8.0))
-                    .bottom(px(8.0))
-                    .w(px(2.0))
-                    .rounded(px(1.0))
-                    .bg(t.accent),
-            )
+            this.bg(t.surface_active).font_weight(FontWeight::MEDIUM)
         })
-        .hover(|style| {
+        .hover(move |style| {
             if active {
                 style
             } else {
@@ -264,12 +249,7 @@ fn nav_item(screen: Screen, active: bool, t: &Theme, on_nav: NavHandler) -> impl
                 .text_size(px(13.0))
                 .child(screen.glyph()),
         )
-        .child(
-            div()
-                .text_size(theme::text_body())
-                .font_weight(FontWeight::MEDIUM)
-                .child(screen.label()),
-        )
+        .child(div().text_size(theme::text_body()).child(screen.label()))
 }
 
 impl RenderOnce for Sidebar {
@@ -284,7 +264,7 @@ impl RenderOnce for Sidebar {
         div()
             .flex()
             .flex_col()
-            .w(px(216.0))
+            .w(px(190.0))
             .h_full()
             .flex_shrink_0()
             .bg(t.sidebar_bg)
