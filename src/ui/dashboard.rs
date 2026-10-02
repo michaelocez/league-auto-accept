@@ -20,7 +20,7 @@ use crate::app::events::{AppEvent, EventOutcome};
 use crate::app::service::NotificationCommand;
 use crate::app::state::{ActivityKind, AppState};
 use crate::config::settings::{
-    is_valid_discord_id, AppSettings, DiscordMention, MAX_DISCORD_USER_IDS,
+    is_valid_discord_id, AppSettings, BackdropMode, DiscordMention, ThemeMode, MAX_DISCORD_USER_IDS,
 };
 use crate::config::store::SettingsStore;
 use crate::notifications::discord::parse_discord_webhook_url;
@@ -37,7 +37,6 @@ use crate::ui::theme::{self, Appearance, SurfaceTreatment, Theme};
 enum ToggleSetting {
     DiscordNotifications,
     MinimizeToTray,
-    SurfaceFrost,
 }
 
 pub struct Dashboard {
@@ -141,6 +140,27 @@ impl Dashboard {
         self.enabled_flag.store(enabled, Ordering::Relaxed);
         self.persist(json!({ "autoAcceptEnabled": enabled }));
     }
+
+    /// Applies a translucent backdrop treatment, falling back to opaque when the OS has no DWM
+    /// backdrop (so the window is never left transparent and unreadable).
+    fn set_treatment(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        treatment: SurfaceTreatment,
+    ) {
+        theme::set_treatment(cx, treatment);
+        // Fall back to opaque where the OS has no DWM backdrop, and persist what actually applied.
+        let effective = if glass::apply(window, theme::current(), treatment) {
+            treatment
+        } else {
+            theme::set_treatment(cx, SurfaceTreatment::Opaque);
+            let _ = glass::apply(window, theme::current(), SurfaceTreatment::Opaque);
+            SurfaceTreatment::Opaque
+        };
+        self.persist(json!({ "windowBackdrop": BackdropMode::from(effective) }));
+        cx.notify();
+    }
 }
 
 pub(crate) fn status_color(summary: &str, t: &Theme) -> Rgba {
@@ -172,7 +192,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> Row {
         let toggle = Toggle::new(id).checked(checked).on_change(cx.listener(
-            move |this, _event: &ClickEvent, window, cx| {
+            move |this, _event: &ClickEvent, _window, cx| {
                 match setting {
                     ToggleSetting::DiscordNotifications => {
                         let next = !this.state.settings.discord_notifications_enabled;
@@ -181,20 +201,6 @@ impl Dashboard {
                     ToggleSetting::MinimizeToTray => {
                         let next = !this.state.settings.minimize_to_tray;
                         this.persist(json!({ "minimizeToTray": next }));
-                    }
-                    ToggleSetting::SurfaceFrost => {
-                        let next = if theme::current_treatment() == SurfaceTreatment::Frost {
-                            SurfaceTreatment::Opaque
-                        } else {
-                            SurfaceTreatment::Frost
-                        };
-                        theme::set_treatment(cx, next);
-                        let background = theme::window_background(theme::current(), next);
-                        let applied = glass::apply(window, background);
-                        // Keep the persisted toggle honest if the OS has no Mica backdrop.
-                        if next == SurfaceTreatment::Frost && !applied {
-                            theme::set_treatment(cx, SurfaceTreatment::Opaque);
-                        }
                     }
                 }
                 cx.notify();
@@ -398,8 +404,13 @@ impl Dashboard {
             );
         }
 
-        let test_row = Row::new("Test delivery")
-            .control(
+        let test_row = div()
+            .flex()
+            .items_center()
+            .gap(theme::space_3())
+            .px(theme::space_4())
+            .py(theme::space_3())
+            .child(
                 Button::new(
                     "test-webhook",
                     if testing {
@@ -424,14 +435,14 @@ impl Dashboard {
             )
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .text_size(theme::text_small())
                     .text_color(test_color)
                     .child(test_message),
             );
 
         SettingsGroup::new()
-            .title("Discord")
-            .footer("Notifications never delay or control Auto Accept.")
             .child(Self::toggle_row(
                 "toggle-discord",
                 "Enable Discord notifications",
@@ -447,8 +458,9 @@ impl Dashboard {
     }
 
     fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = Theme::of(cx);
         let appearance = theme::current();
-        let frost = theme::current_treatment() == SurfaceTreatment::Frost;
+        let treatment = theme::current_treatment();
         let minimize = self.state.settings.minimize_to_tray;
 
         let window = SettingsGroup::new().title("Window").child(Self::toggle_row(
@@ -476,17 +488,45 @@ impl Dashboard {
                 cx,
             ));
 
+        let backdrop_control = div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .bg(t.surface_active)
+            .border_1()
+            .border_color(t.border)
+            .rounded(theme::radius_md())
+            .child(self.backdrop_option(
+                "backdrop-opaque",
+                SurfaceTreatment::Opaque,
+                treatment == SurfaceTreatment::Opaque,
+                cx,
+            ))
+            .child(self.backdrop_option(
+                "backdrop-mica",
+                SurfaceTreatment::Mica,
+                treatment == SurfaceTreatment::Mica,
+                cx,
+            ))
+            .child(self.backdrop_option(
+                "backdrop-acrylic",
+                SurfaceTreatment::Acrylic,
+                treatment == SurfaceTreatment::Acrylic,
+                cx,
+            ));
+
         let appearance_group = SettingsGroup::new()
             .title("Appearance")
             .child(Row::new("Theme").control(theme_control))
-            .child(Self::toggle_row(
-                "toggle-frost",
-                "Translucent window",
-                "Frosted surfaces over the Windows 11 Mica backdrop. Falls back to opaque where unsupported.",
-                frost,
-                ToggleSetting::SurfaceFrost,
-                cx,
-            ));
+            .child(
+                Row::new("Window backdrop")
+                    .description(
+                        "Mica tints from the desktop wallpaper; Acrylic blurs what is behind the \
+                         window in real time. Falls back to opaque where unsupported.",
+                    )
+                    .control(backdrop_control),
+            );
 
         div()
             .flex()
@@ -494,6 +534,50 @@ impl Dashboard {
             .gap(theme::space_6())
             .child(window)
             .child(appearance_group)
+            .into_any_element()
+    }
+
+    /// A backdrop choice rendered as one segment of a segmented control.
+    fn backdrop_option(
+        &self,
+        id: &'static str,
+        value: SurfaceTreatment,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = Theme::of(cx);
+        let label = match value {
+            SurfaceTreatment::Opaque => "Opaque",
+            SurfaceTreatment::Mica => "Mica",
+            SurfaceTreatment::Acrylic => "Acrylic",
+        };
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(theme::space_3())
+            .py(theme::space_1())
+            .rounded(theme::radius_sm())
+            .cursor_pointer()
+            .when(selected, |this| this.bg(t.accent).text_color(t.accent_fg))
+            .when(!selected, |this| this.text_color(t.text_muted))
+            .hover(move |style| {
+                if selected {
+                    style
+                } else {
+                    style.text_color(t.text)
+                }
+            })
+            .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
+                this.set_treatment(window, cx, value);
+            }))
+            .child(
+                div()
+                    .text_size(theme::text_small())
+                    .font_weight(theme::weight_medium())
+                    .child(label),
+            )
             .into_any_element()
     }
 
@@ -525,12 +609,13 @@ impl Dashboard {
             .items_center()
             .gap(theme::space_2())
             .cursor_pointer()
-            .on_click(cx.listener(move |_this, _event: &ClickEvent, window, cx| {
+            .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
                 theme::set_appearance(cx, value);
-                // Frost uses a different Mica variant per appearance, so re-apply on change.
-                if theme::current_treatment() == SurfaceTreatment::Frost {
-                    let background = theme::window_background(value, SurfaceTreatment::Frost);
-                    let _ = glass::apply(window, background);
+                this.persist(json!({ "themeMode": ThemeMode::from(value) }));
+                // Mica/Acrylic map to a different backdrop variant per appearance, so re-apply.
+                let treatment = theme::current_treatment();
+                if treatment != SurfaceTreatment::Opaque {
+                    let _ = glass::apply(window, value, treatment);
                 }
                 cx.notify();
             }))

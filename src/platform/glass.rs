@@ -1,10 +1,15 @@
-//! Windows 11 Mica backdrop support for the "frost" surface treatment.
+//! Windows 11 backdrop support for the translucent surface treatments.
 //!
-//! `WindowBackgroundAppearance::MicaBackdrop` makes GPUI clear the window transparently so a DWM
-//! backdrop can show through. That is only safe where the backdrop actually applies, so we probe
-//! `DWMWA_SYSTEMBACKDROP_TYPE` first and fall back to an opaque background if it is unsupported
-//! (Windows 10, or Windows 11 builds before 22621) — otherwise the window would be left fully
-//! transparent and unreadable.
+//! GPUI must be told to clear the window transparently before a DWM backdrop can show through, and
+//! the only safe appearance for that is the Mica one — GPUI's own `Blurred` path applies a legacy
+//! white-tinted acrylic that washes the window out. So for both Mica and Acrylic we clear with the
+//! Mica appearance and then set `DWMWA_SYSTEMBACKDROP_TYPE` explicitly, which wins:
+//!
+//! - Mica (`DWMSBT_MAINWINDOW`) samples the desktop wallpaper.
+//! - Acrylic (`DWMSBT_TRANSIENTWINDOW`) blurs what is behind the window in real time.
+//!
+//! The probe is best-effort: on Windows 10 or pre-22621 builds the attribute fails and the window
+//! falls back to opaque, rather than being left transparent and unreadable.
 
 use std::ffi::c_void;
 
@@ -12,41 +17,54 @@ use gpui::{Window, WindowBackgroundAppearance};
 use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE};
 
 use crate::platform::window::raw_hwnd;
+use crate::ui::theme::{Appearance, SurfaceTreatment};
 
 const DWMSBT_NONE: i32 = 1;
 const DWMSBT_MAINWINDOW: i32 = 2;
+const DWMSBT_TRANSIENTWINDOW: i32 = 3;
 const DWMSBT_TABBEDWINDOW: i32 = 4;
 
-/// Applies the requested window background, returning whether a Mica backdrop is actually active.
+/// Applies a surface treatment, returning whether a DWM backdrop is actually active.
 ///
-/// `Opaque` (or any non-Mica appearance) always succeeds: it disables the backdrop and clears
-/// opaquely. A Mica request returns `false` on unsupported systems, having left the window opaque.
-pub fn apply(window: &Window, appearance: WindowBackgroundAppearance) -> bool {
+/// `Opaque` always succeeds. Mica/Acrylic return `false` where the backdrop is unsupported, having
+/// left the window opaque.
+pub fn apply(window: &Window, appearance: Appearance, treatment: SurfaceTreatment) -> bool {
     let Some(hwnd) = raw_hwnd(window) else {
         window.set_background_appearance(WindowBackgroundAppearance::Opaque);
         return false;
     };
 
-    let backdrop = match appearance {
-        WindowBackgroundAppearance::MicaBackdrop => Some(DWMSBT_MAINWINDOW),
-        WindowBackgroundAppearance::MicaAltBackdrop => Some(DWMSBT_TABBEDWINDOW),
-        _ => None,
-    };
-
-    let Some(backdrop) = backdrop else {
+    if treatment == SurfaceTreatment::Opaque {
+        window.set_background_appearance(WindowBackgroundAppearance::Opaque);
         unsafe {
             set_backdrop_type(hwnd, DWMSBT_NONE);
         }
-        window.set_background_appearance(appearance);
-        return matches!(appearance, WindowBackgroundAppearance::Opaque);
+        return true;
+    }
+
+    let gpui_background = match appearance {
+        Appearance::Dark => WindowBackgroundAppearance::MicaBackdrop,
+        Appearance::Light => WindowBackgroundAppearance::MicaAltBackdrop,
+    };
+    let backdrop = match treatment {
+        SurfaceTreatment::Mica => match appearance {
+            Appearance::Dark => DWMSBT_MAINWINDOW,
+            Appearance::Light => DWMSBT_TABBEDWINDOW,
+        },
+        SurfaceTreatment::Acrylic => DWMSBT_TRANSIENTWINDOW,
+        SurfaceTreatment::Opaque => unreachable!("handled above"),
     };
 
-    let result = unsafe { set_backdrop_type(hwnd, backdrop) };
-    if result >= 0 {
-        window.set_background_appearance(appearance);
+    // Clear transparently first (the Mica appearance sets its own DWM type), then override with the
+    // backdrop type we actually want so it takes precedence.
+    window.set_background_appearance(gpui_background);
+    if unsafe { set_backdrop_type(hwnd, backdrop) } >= 0 {
         true
     } else {
         window.set_background_appearance(WindowBackgroundAppearance::Opaque);
+        unsafe {
+            set_backdrop_type(hwnd, DWMSBT_NONE);
+        }
         false
     }
 }

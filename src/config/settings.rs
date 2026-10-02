@@ -12,7 +12,26 @@ pub const MAX_WEBHOOK_URL_LENGTH: usize = 2048;
 pub const MAX_NOTIFICATION_MESSAGE_LENGTH: usize = 1800;
 
 /// Current settings schema version.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
+
+/// Light or dark appearance, persisted so a restart keeps the chosen theme.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+}
+
+/// Window backdrop material, persisted so a restart keeps the chosen glass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackdropMode {
+    #[default]
+    Opaque,
+    Mica,
+    Acrylic,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscordMention {
@@ -36,7 +55,7 @@ pub struct NotificationMessages {
     pub game_started: String,
 }
 
-/// The complete, typed application settings (schema v2).
+/// The complete, typed application settings (schema v3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -49,6 +68,8 @@ pub struct AppSettings {
     pub notification_events: NotificationEvents,
     pub notification_messages: NotificationMessages,
     pub minimize_to_tray: bool,
+    pub theme_mode: ThemeMode,
+    pub window_backdrop: BackdropMode,
 }
 
 impl Default for AppSettings {
@@ -70,6 +91,8 @@ impl Default for AppSettings {
                 game_started: "{mentions} the game is now in progress.".into(),
             },
             minimize_to_tray: true,
+            theme_mode: ThemeMode::Dark,
+            window_backdrop: BackdropMode::Opaque,
         }
     }
 }
@@ -140,6 +163,8 @@ pub fn normalize_settings(value: &Value, fallback: &AppSettings) -> AppSettings 
             ),
         },
         minimize_to_tray: boolean(source, "minimizeToTray", fallback.minimize_to_tray),
+        theme_mode: theme_mode(source, "themeMode", fallback.theme_mode),
+        window_backdrop: backdrop_mode(source, "windowBackdrop", fallback.window_backdrop),
     }
 }
 
@@ -241,6 +266,37 @@ fn boolean(source: Option<&serde_json::Map<String, Value>>, key: &str, fallback:
         .and_then(|object| object.get(key))
         .and_then(Value::as_bool)
         .unwrap_or(fallback)
+}
+
+fn theme_mode(
+    source: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+    fallback: ThemeMode,
+) -> ThemeMode {
+    match source
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_str)
+    {
+        Some("light") => ThemeMode::Light,
+        Some("dark") => ThemeMode::Dark,
+        _ => fallback,
+    }
+}
+
+fn backdrop_mode(
+    source: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+    fallback: BackdropMode,
+) -> BackdropMode {
+    match source
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_str)
+    {
+        Some("mica") => BackdropMode::Mica,
+        Some("acrylic") => BackdropMode::Acrylic,
+        Some("opaque") => BackdropMode::Opaque,
+        _ => fallback,
+    }
 }
 
 fn string(
@@ -345,5 +401,35 @@ mod tests {
         assert!(is_valid_discord_id("12345678901234567890"));
         assert!(!is_valid_discord_id("1234"));
         assert!(!is_valid_discord_id("1234567890123456a"));
+    }
+
+    #[test]
+    fn normalizes_theme_and_backdrop_with_fallbacks() {
+        let fallback = AppSettings::default();
+        let settings = normalize_settings(
+            &json!({ "themeMode": "light", "windowBackdrop": "acrylic" }),
+            &fallback,
+        );
+        assert_eq!(settings.theme_mode, ThemeMode::Light);
+        assert_eq!(settings.window_backdrop, BackdropMode::Acrylic);
+
+        let invalid = normalize_settings(
+            &json!({ "themeMode": "blue", "windowBackdrop": 7 }),
+            &fallback,
+        );
+        assert_eq!(invalid.theme_mode, ThemeMode::Dark);
+        assert_eq!(invalid.window_backdrop, BackdropMode::Opaque);
+    }
+
+    #[test]
+    fn merges_theme_and_backdrop_choices() {
+        let current = AppSettings {
+            theme_mode: ThemeMode::Light,
+            window_backdrop: BackdropMode::Mica,
+            ..AppSettings::default()
+        };
+        let merged = merge_settings(&current, &json!({ "windowBackdrop": "acrylic" }));
+        assert_eq!(merged.theme_mode, ThemeMode::Light);
+        assert_eq!(merged.window_backdrop, BackdropMode::Acrylic);
     }
 }

@@ -264,7 +264,7 @@ impl RenderOnce for Sidebar {
         div()
             .flex()
             .flex_col()
-            .w(px(208.0))
+            .w(px(190.0))
             .h_full()
             .flex_shrink_0()
             .bg(t.sidebar_bg)
