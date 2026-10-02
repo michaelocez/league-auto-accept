@@ -130,8 +130,6 @@ pub struct Theme {
     pub accent_hover: Rgba,
     /// Foreground used on top of the accent.
     pub accent_fg: Rgba,
-    /// A subdued accent-tinted surface (e.g. selected nav item background).
-    pub accent_subtle: Rgba,
     /// Success state.
     pub success: Rgba,
     /// Warning state.
@@ -171,7 +169,6 @@ impl Theme {
             accent: rgb(0xfafafa),
             accent_hover: rgb(0xffffff),
             accent_fg: rgb(0x131315),
-            accent_subtle: rgb(0x26262b),
             success: rgb(0x5ec98f),
             warning: rgb(0xd8b15f),
             danger: rgb(0xe08383),
@@ -196,7 +193,6 @@ impl Theme {
             accent: rgb(0x1c1c1f),
             accent_hover: rgb(0x000000),
             accent_fg: rgb(0xffffff),
-            accent_subtle: rgb(0xe6e6ea),
             success: rgb(0x2f9e63),
             warning: rgb(0xa8761f),
             danger: rgb(0xc94a4a),
@@ -216,7 +212,6 @@ impl Theme {
             surface_active: rgb_a(0x2a2a30, 0.72),
             border: rgb_a(0xffffff, 0.10),
             border_strong: rgb_a(0xffffff, 0.18),
-            accent_subtle: rgb_a(0xffffff, 0.10),
             // Lighter secondary text so it stays legible over a translucent (not pure-black) ground.
             text_muted: rgb(0xb6b6bf),
             text_faint: rgb(0x8c8c95),
@@ -236,7 +231,6 @@ impl Theme {
             surface_active: rgb_a(0xe6e6ea, 0.92),
             border: rgb_a(0x000000, 0.10),
             border_strong: rgb_a(0x000000, 0.18),
-            accent_subtle: rgb_a(0x000000, 0.06),
             // Darker secondary text so it stays legible over a mid-grey translucent ground.
             text: rgb(0x121215),
             text_muted: rgb(0x44444c),
@@ -260,7 +254,6 @@ impl Theme {
             surface_active: rgb_a(0x2a2a30, 0.55),
             border: rgb_a(0xffffff, 0.14),
             border_strong: rgb_a(0xffffff, 0.22),
-            accent_subtle: rgb_a(0xffffff, 0.12),
             text_muted: rgb(0xb6b6bf),
             text_faint: rgb(0x8c8c95),
             ..Self::dark()
@@ -279,7 +272,6 @@ impl Theme {
             surface_active: rgb_a(0xe6e6ea, 0.82),
             border: rgb_a(0x000000, 0.14),
             border_strong: rgb_a(0x000000, 0.24),
-            accent_subtle: rgb_a(0x000000, 0.08),
             text: rgb(0x121215),
             text_muted: rgb(0x44444c),
             text_faint: rgb(0x5f5f68),
@@ -392,9 +384,6 @@ pub fn radius_lg() -> Pixels {
 
 // --- Type scale ------------------------------------------------------------------------------
 
-pub fn text_display() -> Pixels {
-    px(28.0)
-}
 pub fn text_title() -> Pixels {
     px(20.0)
 }

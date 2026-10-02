@@ -1,5 +1,5 @@
-//! `SettingsGroup`: an optional title, a bordered surface of [`super::Row`]s separated by inset
-//! hairlines, and an optional footer caption. The macOS System Settings grouping shape.
+//! `SettingsGroup`: an optional title and a bordered surface of [`super::Row`]s separated by inset
+//! hairlines. The macOS System Settings grouping shape.
 
 use gpui::base::StyledExt as _;
 use gpui::prelude::*;
@@ -12,7 +12,6 @@ pub struct SettingsGroup {
     base: Div,
     style: StyleRefinement,
     title: Option<SharedString>,
-    footer: Option<SharedString>,
     children: Vec<AnyElement>,
 }
 
@@ -22,18 +21,12 @@ impl SettingsGroup {
             base: div(),
             style: StyleRefinement::default(),
             title: None,
-            footer: None,
             children: Vec::new(),
         }
     }
 
     pub fn title(mut self, title: impl Into<SharedString>) -> Self {
         self.title = Some(title.into());
-        self
-    }
-
-    pub fn footer(mut self, footer: impl Into<SharedString>) -> Self {
-        self.footer = Some(footer.into());
         self
     }
 }
@@ -101,15 +94,6 @@ impl RenderOnce for SettingsGroup {
                     .rounded(theme::radius_lg())
                     .children(rows),
             )
-            .when_some(self.footer, |this, footer| {
-                this.child(
-                    div()
-                        .px(px(2.0))
-                        .text_size(theme::text_caption())
-                        .text_color(t.text_faint)
-                        .child(footer),
-                )
-            })
             .refine_style(&self.style)
     }
 }
