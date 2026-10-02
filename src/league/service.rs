@@ -65,10 +65,6 @@ impl LeagueService {
         self.enabled.clone()
     }
 
-    pub fn machine_mut(&mut self) -> &mut ReadyCheckMachine {
-        &mut self.machine
-    }
-
     /// Runs until the containing task is cancelled.
     pub async fn run(&mut self) {
         loop {
