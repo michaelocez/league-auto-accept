@@ -9,7 +9,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use gpui::{px, App, FontWeight, Global, Pixels, Rgba};
+use gpui::{px, App, FontWeight, Global, Pixels, Rgba, WindowBackgroundAppearance};
 
 /// Light or dark appearance. Selected by the [`Appearance`] global.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -22,14 +22,33 @@ pub enum Appearance {
 impl Global for Appearance {}
 
 impl Appearance {
-    /// Resolves this appearance to its concrete colour token set.
+    /// Resolves this appearance to its opaque token set.
     pub fn theme(self) -> Theme {
-        match self {
-            Appearance::Dark => Theme::dark(),
-            Appearance::Light => Theme::light(),
+        self.theme_with(SurfaceTreatment::Opaque)
+    }
+
+    /// Resolves this appearance + surface treatment to a concrete token set.
+    pub fn theme_with(self, treatment: SurfaceTreatment) -> Theme {
+        match (self, treatment) {
+            (Appearance::Dark, SurfaceTreatment::Opaque) => Theme::dark(),
+            (Appearance::Dark, SurfaceTreatment::Frost) => Theme::dark_frost(),
+            (Appearance::Light, SurfaceTreatment::Opaque) => Theme::light(),
+            (Appearance::Light, SurfaceTreatment::Frost) => Theme::light_frost(),
         }
     }
 }
+
+/// How surfaces are treated: flat and opaque, or translucent over an OS backdrop ("frost").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SurfaceTreatment {
+    /// Opaque surfaces; the default and the safe fallback.
+    #[default]
+    Opaque,
+    /// Translucent surfaces over the Windows 11 Mica backdrop.
+    Frost,
+}
+
+impl Global for SurfaceTreatment {}
 
 /// The fully resolved colour tokens for one appearance.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,53 +94,57 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Resolves the theme for the current [`Appearance`] global, falling back to dark if unset.
+    /// Resolves the theme for the current [`Appearance`] + [`SurfaceTreatment`] globals.
     pub fn of(cx: &App) -> Theme {
-        cx.try_global::<Appearance>()
+        let appearance = cx.try_global::<Appearance>().copied().unwrap_or_default();
+        let treatment = cx
+            .try_global::<SurfaceTreatment>()
             .copied()
-            .unwrap_or_default()
-            .theme()
+            .unwrap_or_default();
+        appearance.theme_with(treatment)
     }
 
     pub const fn dark() -> Self {
         Self {
-            window_bg: rgb(0x0b0b0c),
-            sidebar_bg: rgb(0x0d0d0f),
-            bg: rgb(0x111113),
-            bg_elevated: rgb(0x17171a),
-            surface: rgb(0x161619),
-            surface_hover: rgb(0x1e1e22),
-            surface_active: rgb(0x26262b),
-            border: rgb(0x242428),
-            border_strong: rgb(0x36363c),
-            text: rgb(0xf4f4f5),
-            text_muted: rgb(0xa0a0a8),
-            text_faint: rgb(0x6e6e76),
+            // Chrome (title bar + sidebar) sits on the window ground; the content pane is a hair
+            // lighter. The two are separated by a hairline, not by a heavy filled slab.
+            window_bg: rgb(0x0e0e10),
+            sidebar_bg: rgb(0x0e0e10),
+            bg: rgb(0x131315),
+            bg_elevated: rgb(0x1a1a1d),
+            surface: rgb(0x17171a),
+            surface_hover: rgb(0x1f1f23),
+            surface_active: rgb(0x2a2a30),
+            border: rgb(0x26262b),
+            border_strong: rgb(0x3a3a42),
+            text: rgb(0xf5f5f7),
+            text_muted: rgb(0xa2a2ab),
+            text_faint: rgb(0x71717a),
             // Neutral, near-white accent: a monochrome action colour rather than a brand hue.
-            accent: rgb(0xe8e8ea),
+            accent: rgb(0xfafafa),
             accent_hover: rgb(0xffffff),
-            accent_fg: rgb(0x131316),
-            accent_subtle: rgb(0x212127),
-            success: rgb(0x63c08d),
-            warning: rgb(0xd2ab60),
-            danger: rgb(0xdd8080),
+            accent_fg: rgb(0x131315),
+            accent_subtle: rgb(0x26262b),
+            success: rgb(0x5ec98f),
+            warning: rgb(0xd8b15f),
+            danger: rgb(0xe08383),
         }
     }
 
     pub const fn light() -> Self {
         Self {
-            window_bg: rgb(0xf1f1f2),
-            sidebar_bg: rgb(0xeaeaec),
+            window_bg: rgb(0xededf0),
+            sidebar_bg: rgb(0xededf0),
             bg: rgb(0xf7f7f8),
             bg_elevated: rgb(0xffffff),
             surface: rgb(0xffffff),
             surface_hover: rgb(0xf0f0f2),
             surface_active: rgb(0xe6e6ea),
-            border: rgb(0xe2e2e5),
-            border_strong: rgb(0xcfcfd4),
-            text: rgb(0x1b1b1e),
-            text_muted: rgb(0x5a5a63),
-            text_faint: rgb(0x8a8a93),
+            border: rgb(0xe4e4e8),
+            border_strong: rgb(0xcfcfd6),
+            text: rgb(0x1c1c1f),
+            text_muted: rgb(0x5f5f68),
+            text_faint: rgb(0x8e8e98),
             // Neutral, near-black accent in light mode.
             accent: rgb(0x1c1c1f),
             accent_hover: rgb(0x000000),
@@ -132,14 +155,55 @@ impl Theme {
             danger: rgb(0xc94a4a),
         }
     }
+
+    /// Dark frost: the whole chrome/page is a light tint over Mica, with grouped surfaces a little
+    /// more opaque so text stays legible while the backdrop still reads through.
+    pub const fn dark_frost() -> Self {
+        Self {
+            window_bg: rgb_a(0x0e0e10, 0.0),
+            sidebar_bg: rgb_a(0x0e0e10, 0.28),
+            bg: rgb_a(0x131315, 0.30),
+            bg_elevated: rgb_a(0x1a1a1d, 0.62),
+            surface: rgb_a(0x17171a, 0.58),
+            surface_hover: rgb_a(0x1f1f23, 0.72),
+            surface_active: rgb_a(0x2a2a30, 0.82),
+            border: rgb_a(0xffffff, 0.10),
+            border_strong: rgb_a(0xffffff, 0.18),
+            accent_subtle: rgb_a(0xffffff, 0.10),
+            ..Self::dark()
+        }
+    }
+
+    /// Light frost: over a light backdrop, grouped surfaces stay near-opaque to keep text contrast.
+    /// A translucent light tint over a dark backdrop would read as grey and lose legibility.
+    pub const fn light_frost() -> Self {
+        Self {
+            window_bg: rgb_a(0xededf0, 0.0),
+            sidebar_bg: rgb_a(0xededf0, 0.72),
+            bg: rgb_a(0xf7f7f8, 0.74),
+            bg_elevated: rgb_a(0xffffff, 0.90),
+            surface: rgb_a(0xffffff, 0.90),
+            surface_hover: rgb_a(0xf0f0f2, 0.94),
+            surface_active: rgb_a(0xe6e6ea, 0.96),
+            border: rgb_a(0x000000, 0.10),
+            border_strong: rgb_a(0x000000, 0.18),
+            accent_subtle: rgb_a(0x000000, 0.06),
+            ..Self::light()
+        }
+    }
 }
 
 const fn rgb(hex: u32) -> Rgba {
+    rgb_a(hex, 1.0)
+}
+
+/// Like [`rgb`] but with an explicit alpha, used for the translucent "frost" surfaces.
+const fn rgb_a(hex: u32, a: f32) -> Rgba {
     Rgba {
         r: ((hex >> 16) & 0xff) as f32 / 255.0,
         g: ((hex >> 8) & 0xff) as f32 / 255.0,
         b: (hex & 0xff) as f32 / 255.0,
-        a: 1.0,
+        a,
     }
 }
 
@@ -158,9 +222,41 @@ pub fn current() -> Appearance {
     }
 }
 
-// The process-local mirror lets `current()` work outside a GPUI context. `set_appearance` is the
-// only writer, so it cannot drift from the `Appearance` global.
+/// Writes the active surface treatment to both the GPUI global and the process-local mirror.
+pub fn set_treatment(cx: &mut App, treatment: SurfaceTreatment) {
+    cx.set_global(treatment);
+    TREATMENT.store(treatment as u8, Ordering::Relaxed);
+}
+
+/// The currently active surface treatment.
+pub fn current_treatment() -> SurfaceTreatment {
+    if TREATMENT.load(Ordering::Relaxed) == SurfaceTreatment::Frost as u8 {
+        SurfaceTreatment::Frost
+    } else {
+        SurfaceTreatment::Opaque
+    }
+}
+
+/// The OS window background that matches a theme + treatment. Frost maps to the Windows 11 Mica
+/// backdrops; the caller is responsible for falling back to [`WindowBackgroundAppearance::Opaque`]
+/// where Mica is unavailable.
+pub fn window_background(
+    appearance: Appearance,
+    treatment: SurfaceTreatment,
+) -> WindowBackgroundAppearance {
+    match treatment {
+        SurfaceTreatment::Opaque => WindowBackgroundAppearance::Opaque,
+        SurfaceTreatment::Frost => match appearance {
+            Appearance::Dark => WindowBackgroundAppearance::MicaBackdrop,
+            Appearance::Light => WindowBackgroundAppearance::MicaAltBackdrop,
+        },
+    }
+}
+
+// The process-local mirrors let `current()`/`current_treatment()` work outside a GPUI context.
+// `set_appearance`/`set_treatment` are the only writers, so they cannot drift from the globals.
 static ACTIVE: AtomicU8 = AtomicU8::new(Appearance::Dark as u8);
+static TREATMENT: AtomicU8 = AtomicU8::new(SurfaceTreatment::Opaque as u8);
 
 // --- Spacing scale (4px base) ----------------------------------------------------------------
 

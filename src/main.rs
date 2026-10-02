@@ -85,7 +85,7 @@ fn main() {
             let notifications = notifications.clone();
             let settings = settings.clone();
             let bounds = Bounds::centered(None, size(px(880.0), px(600.0)), cx);
-            let (_handle, view) = gpui::open_window(
+            let (handle, view) = gpui::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(720.0), px(520.0))),
@@ -95,6 +95,10 @@ fn main() {
                         appears_transparent: true,
                         traffic_light_position: None,
                     }),
+                    window_background: theme::window_background(
+                        theme::current(),
+                        theme::current_treatment(),
+                    ),
                     ..Default::default()
                 },
                 cx,
@@ -143,6 +147,10 @@ fn main() {
                 },
             )
             .expect("failed to open window");
+            // Round the window to match the native Windows 11 look; best-effort on older builds.
+            let _ = handle.update(cx, |_view, window, _cx| {
+                league_auto_accept::platform::popup::apply_rounded_corners(window);
+            });
             view
         };
 
@@ -222,6 +230,7 @@ fn open_tray_popup(
             is_movable: false,
             is_resizable: false,
             is_minimizable: false,
+            // Created opaque; `glass::apply` enables Mica (or falls back) when frost is active.
             window_background: WindowBackgroundAppearance::Opaque,
             ..Default::default()
         },
@@ -231,6 +240,11 @@ fn open_tray_popup(
             // Borderless popups are square with no shadow by default; ask DWM to round + shadow it.
             let _ = handle.update(app, |_view, window, _cx| {
                 league_auto_accept::platform::popup::apply_rounded_shadow(window);
+                if theme::current_treatment() == theme::SurfaceTreatment::Frost {
+                    let background =
+                        theme::window_background(theme::current(), theme::SurfaceTreatment::Frost);
+                    let _ = league_auto_accept::platform::glass::apply(window, background);
+                }
             });
             Some(handle)
         }

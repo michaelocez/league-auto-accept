@@ -1,8 +1,9 @@
-//! Win32/DWM polish for the borderless tray popup window.
+//! Win32/DWM polish for application windows: rounded corners (main window and tray popup) and the
+//! popup's drop shadow.
 //!
 //! A `WindowKind::PopUp` has no frame, so it gets square corners and no drop shadow. On Windows 11
 //! we ask DWM to round the corners and to draw a shadow (by extending a 1px frame into the client
-//! area). Both are best-effort: on unsupported builds the calls simply fail and the popup stays
+//! area). Both are best-effort: on unsupported builds the calls simply fail and the window stays
 //! square, which is still usable.
 
 use std::mem::size_of;
@@ -25,16 +26,20 @@ pub fn apply_rounded_shadow(window: &Window) {
     apply_to(hwnd);
 }
 
+/// Rounds a framed window's corners (Windows 11). Unlike [`apply_rounded_shadow`], it does not
+/// extend the frame into the client area — the main window already has DWM chrome and a shadow, so
+/// extending a frame there would bleed a hairline over the custom title bar.
+pub fn apply_rounded_corners(window: &Window) {
+    let Some(hwnd) = raw_hwnd(window) else {
+        return;
+    };
+    round_corners(hwnd);
+}
+
 fn apply_to(hwnd: HWND) {
     unsafe {
         // Round the corners (Windows 11 22000+).
-        let preference: i32 = DWMWCP_ROUND;
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-            &preference as *const i32 as *const core::ffi::c_void,
-            size_of::<i32>() as u32,
-        );
+        round_corners(hwnd);
 
         // Extending a 1px frame gives the borderless window a DWM drop shadow.
         let margins = MARGINS {
@@ -44,5 +49,17 @@ fn apply_to(hwnd: HWND) {
             cyBottomHeight: 1,
         };
         DwmExtendFrameIntoClientArea(hwnd, &margins);
+    }
+}
+
+fn round_corners(hwnd: HWND) {
+    unsafe {
+        let preference: i32 = DWMWCP_ROUND;
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &preference as *const i32 as *const core::ffi::c_void,
+            size_of::<i32>() as u32,
+        );
     }
 }

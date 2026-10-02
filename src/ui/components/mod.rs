@@ -6,12 +6,16 @@
 
 mod button;
 mod field;
+mod group;
+mod row;
 mod section;
 mod surface;
 mod toggle;
 
 pub use button::{Button, ButtonSize, ButtonVariant};
 pub use field::LabeledField;
+pub use group::SettingsGroup;
+pub use row::Row;
 pub use section::Section;
 pub use surface::{Divider, Elevation, Surface};
 pub use toggle::Toggle;

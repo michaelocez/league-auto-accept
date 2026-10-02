@@ -74,7 +74,7 @@ impl Render for TrayPopup {
             .flex()
             .flex_col()
             .size_full()
-            .bg(t.window_bg)
+            .bg(t.surface)
             .border_1()
             .border_color(t.border_strong)
             .text_color(t.text)

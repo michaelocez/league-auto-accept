@@ -24,18 +24,20 @@ use crate::config::settings::{
 };
 use crate::config::store::SettingsStore;
 use crate::notifications::discord::parse_discord_webhook_url;
+use crate::platform::glass;
 use crate::platform::tray::TrayCommand;
 use crate::ui::components::{
-    Button, ButtonVariant, Divider, Elevation, LabeledField, Section, Surface, Toggle,
+    Button, ButtonVariant, Divider, Elevation, Row, SettingsGroup, Surface, Toggle,
 };
 use crate::ui::shell::{PageHeader, Screen, Sidebar, TitleBar};
-use crate::ui::theme::{self, Appearance, Theme};
+use crate::ui::theme::{self, Appearance, SurfaceTreatment, Theme};
 
 /// Which boolean setting a toggle row switch controls.
 #[derive(Clone, Copy)]
 enum ToggleSetting {
     DiscordNotifications,
     MinimizeToTray,
+    SurfaceFrost,
 }
 
 pub struct Dashboard {
@@ -168,45 +170,43 @@ impl Dashboard {
         checked: bool,
         setting: ToggleSetting,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let t = Theme::of(cx);
-        let (title, subtitle) = (title.to_string(), subtitle.to_string());
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(theme::space_4())
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(theme::space_1())
-                    .text_size(theme::text_body())
-                    .child(div().text_color(t.text).child(title))
-                    .when(!subtitle.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .text_size(theme::text_small())
-                                .text_color(t.text_muted)
-                                .child(subtitle),
-                        )
-                    }),
-            )
-            .child(Toggle::new(id).checked(checked).on_change(cx.listener(
-                move |this, _event: &ClickEvent, _window, cx| {
-                    match setting {
-                        ToggleSetting::DiscordNotifications => {
-                            let next = !this.state.settings.discord_notifications_enabled;
-                            this.persist(json!({ "discordNotificationsEnabled": next }));
-                        }
-                        ToggleSetting::MinimizeToTray => {
-                            let next = !this.state.settings.minimize_to_tray;
-                            this.persist(json!({ "minimizeToTray": next }));
+    ) -> Row {
+        let toggle = Toggle::new(id).checked(checked).on_change(cx.listener(
+            move |this, _event: &ClickEvent, window, cx| {
+                match setting {
+                    ToggleSetting::DiscordNotifications => {
+                        let next = !this.state.settings.discord_notifications_enabled;
+                        this.persist(json!({ "discordNotificationsEnabled": next }));
+                    }
+                    ToggleSetting::MinimizeToTray => {
+                        let next = !this.state.settings.minimize_to_tray;
+                        this.persist(json!({ "minimizeToTray": next }));
+                    }
+                    ToggleSetting::SurfaceFrost => {
+                        let next = if theme::current_treatment() == SurfaceTreatment::Frost {
+                            SurfaceTreatment::Opaque
+                        } else {
+                            SurfaceTreatment::Frost
+                        };
+                        theme::set_treatment(cx, next);
+                        let background = theme::window_background(theme::current(), next);
+                        let applied = glass::apply(window, background);
+                        // Keep the persisted toggle honest if the OS has no Mica backdrop.
+                        if next == SurfaceTreatment::Frost && !applied {
+                            theme::set_treatment(cx, SurfaceTreatment::Opaque);
                         }
                     }
-                    cx.notify();
-                },
-            )))
+                }
+                cx.notify();
+            },
+        ));
+
+        let row = Row::new(title).control(toggle);
+        if subtitle.is_empty() {
+            row
+        } else {
+            row.description(subtitle)
+        }
     }
 
     fn render_dashboard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -215,19 +215,19 @@ impl Dashboard {
         let ready_message = self.state.ready_check_message.clone();
         let summary = self.state.summary();
 
-        let (state_color, hero_bg) = match summary {
-            "Active" => (t.success, t.accent_subtle),
-            "Connecting" => (t.warning, t.bg_elevated),
-            "League offline" => (t.danger, t.bg_elevated),
-            _ => (t.text_faint, t.bg_elevated),
+        let state_color = match summary {
+            "Active" => t.success,
+            "Connecting" => t.warning,
+            "League offline" => t.danger,
+            _ => t.text_faint,
         };
-        let hero_detail = if !auto_accept {
-            "Auto Accept is off. Turn it on to monitor ready checks.".to_string()
-        } else {
+        let hero_detail = if auto_accept {
             ready_message
+        } else {
+            "Off — turn on Auto Accept to monitor ready checks.".to_string()
         };
 
-        let hero = Surface::new().background(hero_bg).child(
+        let hero = Surface::new().child(
             div()
                 .flex()
                 .items_center()
@@ -243,10 +243,10 @@ impl Dashboard {
                                 .flex()
                                 .items_center()
                                 .gap(theme::space_3())
-                                .child(div().size(px(10.0)).rounded_full().bg(state_color))
+                                .child(div().size(px(9.0)).rounded_full().bg(state_color))
                                 .child(
                                     div()
-                                        .text_size(theme::text_display())
+                                        .text_size(theme::text_title())
                                         .font_weight(theme::weight_semibold())
                                         .text_color(t.text)
                                         .child(summary),
@@ -262,15 +262,13 @@ impl Dashboard {
                 .child(
                     div()
                         .flex()
-                        .flex_col()
-                        .items_end()
-                        .gap(theme::space_2())
+                        .items_center()
+                        .gap(theme::space_3())
                         .child(
                             div()
-                                .text_size(theme::text_caption())
-                                .font_weight(theme::weight_medium())
-                                .text_color(t.text_faint)
-                                .child("AUTO ACCEPT"),
+                                .text_size(theme::text_small())
+                                .text_color(t.text_muted)
+                                .child("Auto Accept"),
                         )
                         .child(
                             Toggle::new("toggle-auto-accept")
@@ -349,10 +347,10 @@ impl Dashboard {
                 div()
                     .px(theme::space_4())
                     .py(theme::space_3())
-                    .text_size(theme::text_caption())
+                    .text_size(theme::text_small())
                     .font_weight(theme::weight_medium())
-                    .text_color(t.text_faint)
-                    .child("RECENT ACTIVITY"),
+                    .text_color(t.text_muted)
+                    .child("Recent activity"),
             )
             .child(Divider::horizontal())
             .child(
@@ -388,23 +386,20 @@ impl Dashboard {
             }
         };
 
-        let webhook_field = if webhook_error.is_empty() {
-            LabeledField::new()
-                .label("Discord webhook URL")
-                .helper("Stored in the privileged backend; never shown to other apps.")
-                .child(Input::new(&self.webhook))
-        } else {
-            LabeledField::new()
-                .label("Discord webhook URL")
-                .error(webhook_error)
-                .child(Input::new(&self.webhook))
-        };
+        let mut webhook_row = Row::new("Webhook URL")
+            .description("Stored in the privileged backend; never shown to other apps.")
+            .child(div().max_w(px(440.0)).child(Input::new(&self.webhook)));
+        if !webhook_error.is_empty() {
+            webhook_row = webhook_row.child(
+                div()
+                    .text_size(theme::text_caption())
+                    .text_color(t.danger)
+                    .child(webhook_error),
+            );
+        }
 
-        let test_row = div()
-            .flex()
-            .items_center()
-            .gap(theme::space_3())
-            .child(
+        let test_row = Row::new("Test delivery")
+            .control(
                 Button::new(
                     "test-webhook",
                     if testing {
@@ -434,79 +429,71 @@ impl Dashboard {
                     .child(test_message),
             );
 
-        Surface::new()
-            .child(
-                Section::new()
-                    .title("Discord")
-                    .subtitle("Webhook alerts. Notifications never delay or control Auto Accept.")
-                    .child(Self::toggle_row(
-                        "toggle-discord",
-                        "Enable Discord notifications",
-                        "Queue popped, auto-accepted and game-started alerts.",
-                        discord_enabled,
-                        ToggleSetting::DiscordNotifications,
-                        cx,
-                    ))
-                    .child(webhook_field)
-                    .child(self.render_mentions(&t, cx))
-                    .child(test_row),
-            )
+        SettingsGroup::new()
+            .title("Discord")
+            .footer("Notifications never delay or control Auto Accept.")
+            .child(Self::toggle_row(
+                "toggle-discord",
+                "Enable Discord notifications",
+                "Queue popped, auto-accepted and game-started alerts.",
+                discord_enabled,
+                ToggleSetting::DiscordNotifications,
+                cx,
+            ))
+            .child(webhook_row)
+            .child(self.render_mentions(&t, cx))
+            .child(test_row)
             .into_any_element()
     }
 
     fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let t = Theme::of(cx);
+        let appearance = theme::current();
+        let frost = theme::current_treatment() == SurfaceTreatment::Frost;
         let minimize = self.state.settings.minimize_to_tray;
 
-        let window = Surface::new().child(Section::new().title("Window").child(Self::toggle_row(
+        let window = SettingsGroup::new().title("Window").child(Self::toggle_row(
             "toggle-minimize",
             "Close to tray",
-            "",
+            "Keep running in the system tray when the window is closed.",
             minimize,
             ToggleSetting::MinimizeToTray,
             cx,
-        )));
+        ));
 
-        let appearance = theme::current();
-        let appearance_section = Surface::new().child(
-            Section::new().title("Appearance").child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(theme::space_4())
-                    .child(
-                        div()
-                            .text_size(theme::text_body())
-                            .text_color(t.text)
-                            .child("Theme"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(theme::space_3())
-                            .child(self.appearance_option(
-                                "theme-dark",
-                                Appearance::Dark,
-                                appearance == Appearance::Dark,
-                                cx,
-                            ))
-                            .child(self.appearance_option(
-                                "theme-light",
-                                Appearance::Light,
-                                appearance == Appearance::Light,
-                                cx,
-                            )),
-                    ),
-            ),
-        );
+        let theme_control = div()
+            .flex()
+            .gap(theme::space_3())
+            .child(self.appearance_option(
+                "theme-dark",
+                Appearance::Dark,
+                appearance == Appearance::Dark,
+                cx,
+            ))
+            .child(self.appearance_option(
+                "theme-light",
+                Appearance::Light,
+                appearance == Appearance::Light,
+                cx,
+            ));
+
+        let appearance_group = SettingsGroup::new()
+            .title("Appearance")
+            .child(Row::new("Theme").control(theme_control))
+            .child(Self::toggle_row(
+                "toggle-frost",
+                "Translucent window",
+                "Frosted surfaces over the Windows 11 Mica backdrop. Falls back to opaque where unsupported.",
+                frost,
+                ToggleSetting::SurfaceFrost,
+                cx,
+            ));
 
         div()
             .flex()
             .flex_col()
-            .gap(theme::space_5())
+            .gap(theme::space_6())
             .child(window)
-            .child(appearance_section)
+            .child(appearance_group)
             .into_any_element()
     }
 
@@ -538,8 +525,13 @@ impl Dashboard {
             .items_center()
             .gap(theme::space_2())
             .cursor_pointer()
-            .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
+            .on_click(cx.listener(move |_this, _event: &ClickEvent, window, cx| {
                 theme::set_appearance(cx, value);
+                // Frost uses a different Mica variant per appearance, so re-apply on change.
+                if theme::current_treatment() == SurfaceTreatment::Frost {
+                    let background = theme::window_background(value, SurfaceTreatment::Frost);
+                    let _ = glass::apply(window, background);
+                }
                 cx.notify();
             }))
             .child(
@@ -617,7 +609,7 @@ impl Dashboard {
             .into_any_element()
     }
 
-    fn render_mentions(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_mentions(&self, t: &Theme, cx: &mut Context<Self>) -> Row {
         let mentions = self.state.settings.discord_mentions.clone();
 
         let rows: Vec<gpui::AnyElement> = mentions
@@ -741,39 +733,19 @@ impl Dashboard {
                     })),
             );
 
-        div()
-            .flex()
-            .flex_col()
-            .gap(theme::space_2())
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(theme::space_1())
-                    .child(
-                        div()
-                            .text_size(theme::text_small())
-                            .font_weight(theme::weight_medium())
-                            .text_color(t.text_muted)
-                            .child("People to mention"),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme::text_caption())
-                            .text_color(t.text_faint)
-                            .child("Mentioned at the start of each notification. Up to 5."),
-                    ),
-            )
+        let mut row = Row::new("People to mention")
+            .description("Mentioned at the start of each notification. Up to 5.")
             .children(rows)
-            .child(add_row)
-            .when_some(self.mention_error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .text_size(theme::text_caption())
-                        .text_color(t.danger)
-                        .child(error),
-                )
-            })
+            .child(add_row);
+        if let Some(error) = self.mention_error.clone() {
+            row = row.child(
+                div()
+                    .text_size(theme::text_caption())
+                    .text_color(t.danger)
+                    .child(error),
+            );
+        }
+        row
     }
 }
 
