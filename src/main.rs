@@ -63,7 +63,7 @@ fn main() {
     );
     let enabled_flag = background.enabled_flag.clone();
     let notifications = background.notifications.clone();
-    tray::spawn(tx.clone());
+    tray::spawn(tx.clone(), enabled_flag.clone());
 
     // The tray popup sends its intents through the same channel as the tray.
     let ui_tx = tx.clone();
