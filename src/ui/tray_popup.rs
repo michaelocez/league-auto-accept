@@ -63,10 +63,12 @@ impl Render for TrayPopup {
         let dashboard = self.dashboard.read(cx);
         let summary = dashboard.state.summary();
         let auto_accept = dashboard.state.settings.auto_accept_enabled;
+        let discord_enabled = dashboard.state.settings.discord_notifications_enabled;
         let connection = dashboard.state.connection.label();
         let status = status_color(summary, &t);
 
         let toggle_tx = self.tx.clone();
+        let discord_tx = self.tx.clone();
         let open_tx = self.tx.clone();
         let quit_tx = self.tx.clone();
 
@@ -164,6 +166,27 @@ impl Render for TrayPopup {
                                     .on_change(move |_event: &ClickEvent, _window, _app| {
                                         let _ = toggle_tx.try_send(AppEvent::Tray(
                                             TrayCommand::ToggleAutoAccept,
+                                        ));
+                                    }),
+                            ),
+                    )
+                    .child(Divider::horizontal())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(theme::text_body())
+                                    .child("Discord notifications"),
+                            )
+                            .child(
+                                Toggle::new("popup-discord")
+                                    .checked(discord_enabled)
+                                    .on_change(move |_event: &ClickEvent, _window, _app| {
+                                        let _ = discord_tx.try_send(AppEvent::Tray(
+                                            TrayCommand::ToggleDiscordNotifications,
                                         ));
                                     }),
                             ),
