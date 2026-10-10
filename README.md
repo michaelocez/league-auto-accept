@@ -18,8 +18,9 @@ service or driver, no telemetry, and no remote content in the UI.
 - **Appearance**: **Dark** and **Light** themes, plus a window backdrop of **Opaque**,
   **Mica** (subtle, samples the desktop wallpaper) or **Acrylic** (blurs what is behind the window
   in real time). Mica/Acrylic require Windows 11; elsewhere the window stays opaque.
-- **Always-present system tray**: live status, an Auto Accept
-  toggle, Open, and Quit.
+- **Always-present system tray**: live status, plus quick toggles for **Auto Accept** and
+  **Discord notifications**: in both the left-click popup and the native right-click menu; with
+  Open and Quit.
 - **Settings** persist per user (Auto Accept state, theme, window backdrop, minimize-to-tray,
   Discord config, mentions).
 - **Single instance**; minimize/close-to-tray is configurable.

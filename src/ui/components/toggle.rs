@@ -1,14 +1,27 @@
-//! `Toggle`: a token-styled on/off switch with disabled state.
+//! `Toggle`: a token-styled on/off switch whose knob slides and whose colours interpolate via a
+//! GPUI spring, so state changes read as motion rather than an instant flip. The spring also smooths
+//! rapid toggles (momentum is preserved) and the animation respects the system reduce-motion setting.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::base::StyledExt as _;
 use gpui::prelude::*;
-use gpui::{div, px, App, ClickEvent, ElementId, IntoElement, StyleRefinement, Window};
+use gpui::{
+    div, px, AnimationExt as _, AnimationPhase, App, ClickEvent, ElementId, IntoElement,
+    SpringAnimation, SpringConfig, StyleRefinement, Window,
+};
 
 use crate::ui::theme::Theme;
 
 type ChangeHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+const TRACK_WIDTH: f32 = 44.0;
+const TRACK_HEIGHT: f32 = 24.0;
+const KNOB: f32 = 18.0;
+const PAD: f32 = 3.0;
+/// Horizontal travel of the knob between the off and on positions.
+const TRAVEL: f32 = TRACK_WIDTH - KNOB - PAD * 2.0;
 
 #[derive(IntoElement)]
 pub struct Toggle {
@@ -63,31 +76,51 @@ impl RenderOnce for Toggle {
         let checked = self.checked;
         let disabled = self.disabled;
 
-        let track = if checked { t.accent } else { t.surface_active };
-        let knob = if checked { t.accent_fg } else { t.text_muted };
-        let border = if checked { t.accent } else { t.border_strong };
+        // A near-critically-damped spring: quick and smooth, with no visible overshoot.
+        let spring = SpringConfig::new(180.0, 26.0, 1.0);
+        let target = AnimationPhase(if checked { 1.0 } else { 0.0 });
+        let track_anim = SpringAnimation::new(spring).to(target).with_epsilon(0.001);
+        let knob_anim = SpringAnimation::new(spring).to(target).with_epsilon(0.001);
 
-        div()
-            .id(self.id)
-            .flex()
-            .items_center()
-            .when(checked, |this| this.justify_end())
-            .w(px(44.0))
-            .h(px(24.0))
-            .px(px(3.0))
-            .bg(track)
-            .border_1()
-            .border_color(border)
+        let track_id = ElementId::NamedChild(Arc::new(self.id.clone()), "track".into());
+        let knob_id = ElementId::NamedChild(Arc::new(self.id.clone()), "knob".into());
+
+        let knob = div()
+            .absolute()
+            .top(px(PAD))
+            .size(px(KNOB))
             .rounded_full()
+            .with_spring(knob_id, knob_anim, move |el, phase: AnimationPhase| {
+                el.left(phase.interpolate_between(0.0..=1.0, px(PAD), px(PAD + TRAVEL)))
+                    .bg(phase.interpolate_between_clamped(0.0..=1.0, t.text_muted, t.accent_fg))
+            });
+
+        let track = div()
+            .id(self.id)
+            .relative()
+            .w(px(TRACK_WIDTH))
+            .h(px(TRACK_HEIGHT))
+            .rounded_full()
+            .border_1()
             .when(disabled, |this| this.opacity(0.5).cursor_default())
             .when(!disabled, |this| {
                 this.cursor_pointer()
-                    .hover(|style| style.border_color(t.border_strong))
+                    .hover(|style| style.opacity(0.92))
+                    .active(|style| style.opacity(0.85))
                     .when_some(self.on_change, |this, handler| {
                         this.on_click(move |event, window, app| handler(event, window, app))
                     })
             })
-            .child(div().size(px(18.0)).bg(knob).rounded_full())
-            .refine_style(&self.style)
+            .child(knob)
+            .refine_style(&self.style);
+
+        track.with_spring(track_id, track_anim, move |el, phase: AnimationPhase| {
+            el.bg(phase.interpolate_between_clamped(0.0..=1.0, t.surface_active, t.accent))
+                .border_color(phase.interpolate_between_clamped(
+                    0.0..=1.0,
+                    t.border_strong,
+                    t.accent,
+                ))
+        })
     }
 }

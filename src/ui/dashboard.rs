@@ -126,6 +126,10 @@ impl Dashboard {
                 let next = !self.state.settings.auto_accept_enabled;
                 self.set_auto_accept(next);
             }
+            AppEvent::Tray(TrayCommand::ToggleDiscordNotifications) => {
+                let next = !self.state.settings.discord_notifications_enabled;
+                self.persist(json!({ "discordNotificationsEnabled": next }));
+            }
             AppEvent::Service(service_event) => self.state.apply_service_event(&service_event),
             AppEvent::WebhookTest(result) => {
                 self.state.webhook_test = Some(result);

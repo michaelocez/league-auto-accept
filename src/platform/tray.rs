@@ -7,13 +7,13 @@
 //! To avoid colliding with GPUI's own loop, the tray lives on a dedicated thread with its own
 //! Win32 message pump and forwards commands to the UI through an `async_channel`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 use crate::app::events::AppEvent;
+use crate::config::settings::AppSettings;
 
 /// Commands the tray can issue. They map to user intents, not state mutations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +22,7 @@ pub enum TrayCommand {
     /// Open (or refresh) the custom GPUI tray popup near the icon.
     OpenPopup,
     ToggleAutoAccept,
+    ToggleDiscordNotifications,
     Quit,
 }
 
@@ -29,14 +30,14 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../../assets/tray-icon.png");
 
 /// Creates the tray on a dedicated thread and returns immediately.
 ///
-/// `auto_accept` is the shared, authoritative auto-accept flag (the same one the main window and
-/// popup write). The native right-click menu's check item mirrors it, so the fallback menu can
+/// `settings` is the shared, authoritative settings snapshot (the same one the main window and
+/// popup write). The native right-click menu's check items mirror it, so the fallback menu can
 /// never disagree with the app.
-pub fn spawn(tx: async_channel::Sender<AppEvent>, auto_accept: Arc<AtomicBool>) {
+pub fn spawn(tx: async_channel::Sender<AppEvent>, settings: Arc<RwLock<AppSettings>>) {
     let spawned = std::thread::Builder::new()
         .name("laa-tray".to_string())
         .spawn(move || {
-            if let Err(error) = run(tx, auto_accept) {
+            if let Err(error) = run(tx, settings) {
                 log::error!("tray thread failed: {error}");
             }
         });
@@ -53,29 +54,35 @@ fn load_icon() -> Result<Icon, String> {
     Icon::from_rgba(image.into_raw(), width, height).map_err(|error| error.to_string())
 }
 
-fn run(tx: async_channel::Sender<AppEvent>, auto_accept: Arc<AtomicBool>) -> Result<(), String> {
+fn run(
+    tx: async_channel::Sender<AppEvent>,
+    settings: Arc<RwLock<AppSettings>>,
+) -> Result<(), String> {
     let icon = load_icon()?;
+
+    let (auto_accept_on, discord_on) = settings
+        .read()
+        .map(|s| (s.auto_accept_enabled, s.discord_notifications_enabled))
+        .unwrap_or((false, false));
 
     let menu = Menu::new();
     let show = MenuItem::new("Show League Auto Accept", true, None);
-    // Seed the check item from the real state so it is correct even before the first toggle.
-    let toggle = CheckMenuItem::new(
-        "Auto Accept",
-        true,
-        auto_accept.load(Ordering::Relaxed),
-        None,
-    );
+    // Seed the check items from the real state so they are correct even before the first toggle.
+    let toggle = CheckMenuItem::new("Auto Accept", true, auto_accept_on, None);
+    let discord = CheckMenuItem::new("Discord notifications", true, discord_on, None);
     let quit = MenuItem::new("Quit", true, None);
     menu.append(&show).map_err(|error| error.to_string())?;
     menu.append(&PredefinedMenuItem::separator())
         .map_err(|error| error.to_string())?;
     menu.append(&toggle).map_err(|error| error.to_string())?;
+    menu.append(&discord).map_err(|error| error.to_string())?;
     menu.append(&PredefinedMenuItem::separator())
         .map_err(|error| error.to_string())?;
     menu.append(&quit).map_err(|error| error.to_string())?;
 
     let show_id = show.id().clone();
     let toggle_id = toggle.id().clone();
+    let discord_id = discord.id().clone();
     let quit_id = quit.id().clone();
     let menu_tx = tx.clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -83,6 +90,8 @@ fn run(tx: async_channel::Sender<AppEvent>, auto_accept: Arc<AtomicBool>) -> Res
             Some(TrayCommand::ShowWindow)
         } else if event.id == toggle_id {
             Some(TrayCommand::ToggleAutoAccept)
+        } else if event.id == discord_id {
+            Some(TrayCommand::ToggleDiscordNotifications)
         } else if event.id == quit_id {
             Some(TrayCommand::Quit)
         } else {
@@ -115,13 +124,19 @@ fn run(tx: async_channel::Sender<AppEvent>, auto_accept: Arc<AtomicBool>) -> Res
         .map_err(|error| error.to_string())?;
 
     log::info!("tray icon created");
-    // Keep the native check item in step with the authoritative flag. muda items are not `Send`
-    // (they hold an `Rc<RefCell<..>>`), so the update must happen on this thread — poll the atomic
-    // from the message loop, which wakes at least every `SYNC_INTERVAL_MS`.
+    // Keep the native check items in step with the authoritative settings. muda items are not
+    // `Send` (they hold an `Rc<RefCell<..>>`), so the update must happen on this thread — poll the
+    // shared settings from the message loop, which wakes at least every `SYNC_INTERVAL_MS`.
     run_message_loop(move || {
-        let current = auto_accept.load(Ordering::Relaxed);
-        if toggle.is_checked() != current {
-            toggle.set_checked(current);
+        let (auto_accept_on, discord_on) = settings
+            .read()
+            .map(|s| (s.auto_accept_enabled, s.discord_notifications_enabled))
+            .unwrap_or((false, false));
+        if toggle.is_checked() != auto_accept_on {
+            toggle.set_checked(auto_accept_on);
+        }
+        if discord.is_checked() != discord_on {
+            discord.set_checked(discord_on);
         }
     });
     Ok(())

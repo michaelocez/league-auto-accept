@@ -63,7 +63,7 @@ fn main() {
     );
     let enabled_flag = background.enabled_flag.clone();
     let notifications = background.notifications.clone();
-    tray::spawn(tx.clone(), enabled_flag.clone());
+    tray::spawn(tx.clone(), settings_shared.clone());
 
     // The tray popup sends its intents through the same channel as the tray.
     let ui_tx = tx.clone();
@@ -223,7 +223,7 @@ fn open_tray_popup(
         .map(|display| display.visible_bounds())
         .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0))));
     let width = px(300.0);
-    let height = px(252.0);
+    let height = px(300.0);
     let margin = px(8.0);
     let origin = point(
         area.origin.x + area.size.width - width - margin,
