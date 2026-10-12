@@ -1,0 +1,44 @@
+name: CI
+
+# Formatting and lint gates for changes targeting main. The release workflow still owns the test
+# suite and the portable build; these checks run on every pull request so a warning cannot reach
+# main unnoticed.
+#
+# Third-party actions are pinned to immutable commit SHAs for supply-chain hardening.
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust (stable, MSVC)
+        # Pinned to a SHA, so the toolchain must be given explicitly (a SHA conveys no version).
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings

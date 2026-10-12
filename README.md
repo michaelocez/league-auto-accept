@@ -108,6 +108,9 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+Formatting and lints are enforced in CI on every pull request and on `main`; the release workflow
+runs the test suite and the portable build.
+
 ## Architecture
 
 ```text
