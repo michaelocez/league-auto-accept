@@ -338,3 +338,198 @@ fn parse_text_event(text: &str) -> Option<LcuEvent> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     parse_lcu_event(&value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(enabled: bool) -> (MachineSession, Arc<AtomicBool>) {
+        let flag = Arc::new(AtomicBool::new(enabled));
+        (MachineSession::new(flag.clone()), flag)
+    }
+
+    /// Returns `(generation, timer)` for the scheduled accept, if one was emitted.
+    fn scheduled(effects: &[Effect]) -> Option<(u64, u64)> {
+        effects.iter().find_map(|effect| match effect {
+            Effect::ScheduleAccept {
+                generation, timer, ..
+            } => Some((*generation, *timer)),
+            _ => None,
+        })
+    }
+
+    fn accepted(effects: &[Effect]) -> Vec<u64> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Accept { generation } => Some(*generation),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn lifecycle(effects: &[Effect]) -> Vec<Lifecycle> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Lifecycle(event) => Some(*event),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn disabling_before_the_timer_fires_suppresses_the_accept() {
+        let (mut session, enabled) = session(true);
+        session.on_connection(true);
+        let (generation, timer) = scheduled(&session.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+
+        // Auto Accept is turned off; the discovery poll has not run yet.
+        enabled.store(false, Ordering::Relaxed);
+
+        let effects = session.on_timer_fired(generation, timer);
+        assert!(accepted(&effects).is_empty());
+        assert!(effects.contains(&Effect::CancelTimer));
+    }
+
+    #[test]
+    fn a_cancelled_timer_cannot_fire_after_re_enabling() {
+        let (mut session, enabled) = session(true);
+        session.on_connection(true);
+        let (generation, stale_timer) = scheduled(&session.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+
+        enabled.store(false, Ordering::Relaxed);
+        session.on_timer_fired(generation, stale_timer);
+
+        enabled.store(true, Ordering::Relaxed);
+        let re_enabled = session.on_timer_fired(generation, stale_timer);
+        assert!(
+            accepted(&re_enabled).is_empty(),
+            "the cancelled timer must not accept"
+        );
+        let (_, fresh_timer) =
+            scheduled(&re_enabled).expect("re-enabling should arm a fresh timer");
+
+        // Exactly two attempts across the cycle: the first, then the one bounded retry.
+        assert_eq!(
+            accepted(&session.on_timer_fired(generation, fresh_timer)).len(),
+            1
+        );
+        let after_failure = session.on_accept_result(generation, false);
+        let (_, retry_timer) = scheduled(&after_failure).expect("a retry should be scheduled");
+        assert_eq!(
+            accepted(&session.on_timer_fired(generation, retry_timer)).len(),
+            1
+        );
+        let exhausted = session.on_accept_result(generation, false);
+        assert!(scheduled(&exhausted).is_none());
+
+        // The cancelled timer stays inert for the rest of the cycle.
+        assert!(accepted(&session.on_timer_fired(generation, stale_timer)).is_empty());
+    }
+
+    #[test]
+    fn reconnecting_discards_the_previous_cycle_and_its_timers() {
+        let (mut session, _enabled) = session(true);
+        session.on_connection(true);
+        let (generation, timer) = scheduled(&session.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+
+        // The League client restarts: the old connection drops and a new one is established.
+        let dropped = session.on_connection(false);
+        assert!(dropped.contains(&Effect::CancelTimer));
+        let reconnected = session.on_connection(true);
+        assert!(reconnected
+            .iter()
+            .any(|effect| matches!(effect, Effect::Bootstrap { .. })));
+
+        // The pre-reconnect timer must not accept against the new generation.
+        assert!(accepted(&session.on_timer_fired(generation, timer)).is_empty());
+
+        // The bootstrap snapshot opens a fresh cycle with its own timer.
+        let (new_generation, new_timer) = scheduled(&session.on_ready_check("InProgress", "None"))
+            .expect("the new cycle should arm a timer");
+        assert_ne!(new_generation, generation);
+        assert_eq!(
+            accepted(&session.on_timer_fired(new_generation, new_timer)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_stale_accept_result_is_ignored_after_a_reconnect() {
+        let (mut session, _enabled) = session(true);
+        session.on_connection(true);
+        let (generation, timer) = scheduled(&session.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+        assert_eq!(
+            accepted(&session.on_timer_fired(generation, timer)).len(),
+            1
+        );
+
+        // The request is still in flight when the client reconnects.
+        session.on_connection(false);
+        session.on_connection(true);
+
+        let late = session.on_accept_result(generation, true);
+        assert!(
+            late.is_empty(),
+            "a result from a previous generation must not apply"
+        );
+        assert!(!lifecycle(&late).contains(&Lifecycle::AutoAccepted));
+    }
+
+    #[test]
+    fn cancelling_while_an_accept_is_in_flight_starts_no_second_request() {
+        let (mut session, enabled) = session(true);
+        session.on_connection(true);
+        let (generation, timer) = scheduled(&session.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+        assert_eq!(
+            accepted(&session.on_timer_fired(generation, timer)).len(),
+            1
+        );
+
+        // Auto Accept is turned off while the request is in flight: the request already sent
+        // is not retracted, but no further request may follow.
+        enabled.store(false, Ordering::Relaxed);
+        assert!(accepted(&session.on_timer_fired(generation, timer)).is_empty());
+
+        let settled = session.on_accept_result(generation, true);
+        assert!(lifecycle(&settled).contains(&Lifecycle::AutoAccepted));
+    }
+
+    #[test]
+    fn disabling_stops_the_retry_of_a_failed_accept() {
+        let (mut session, enabled) = session(true);
+        session.on_connection(true);
+        let (generation, timer) = scheduled(&session.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+        session.on_timer_fired(generation, timer);
+
+        enabled.store(false, Ordering::Relaxed);
+        let failed = session.on_accept_result(generation, false);
+        assert!(scheduled(&failed).is_none());
+        assert!(failed
+            .iter()
+            .any(|effect| matches!(effect, Effect::State(Status::Error, _))));
+    }
+
+    #[test]
+    fn enabling_mid_cycle_arms_the_accept_at_the_next_event() {
+        let (mut session, enabled) = session(false);
+        session.on_connection(true);
+        assert!(scheduled(&session.on_ready_check("InProgress", "None")).is_none());
+
+        // The user enables Auto Accept; the next event reconciles the flag and arms the timer.
+        enabled.store(true, Ordering::Relaxed);
+        let effects = session.on_gameflow_phase("ReadyCheck", true);
+        let (generation, timer) = scheduled(&effects).expect("enabling should arm a timer");
+        assert_eq!(
+            accepted(&session.on_timer_fired(generation, timer)).len(),
+            1
+        );
+    }
+}
