@@ -85,6 +85,7 @@ fn main() {
             let settings_shared = settings_shared.clone();
             let notifications = notifications.clone();
             let settings = settings.clone();
+            let minimize_to_tray = settings.minimize_to_tray;
             let bounds = Bounds::centered(None, size(px(880.0), px(600.0)), cx);
             let (handle, view) = gpui::open_window(
                 WindowOptions {
@@ -117,7 +118,7 @@ fn main() {
                         }
                         state
                     });
-                    let view = cx.new(|cx| {
+                    cx.new(|cx| {
                         Dashboard::new(
                             settings,
                             store,
@@ -128,29 +129,16 @@ fn main() {
                             window,
                             cx,
                         )
-                    });
-                    let view_for_close = view.clone();
-                    // Hide (don't close) when minimize-to-tray is on; the window — and all state —
-                    // is preserved and restored in place from the tray.
-                    window.on_window_should_close(cx, move |window, cx| {
-                        let minimize_to_tray =
-                            view_for_close.read(cx).state().settings.minimize_to_tray;
-                        if minimize_to_tray {
-                            log::info!("close intercepted: hiding to tray");
-                            platform_window::hide(window);
-                            false
-                        } else {
-                            log::info!("close allowed: exiting application");
-                            true
-                        }
-                    });
-                    view
+                    })
                 },
             )
             .expect("failed to open window");
             // Round the window to match the native Windows 11 look; best-effort on older builds.
             let _ = handle.update(cx, |_view, window, _cx| {
                 league_auto_accept::platform::popup::apply_rounded_corners(window);
+                // Let closing hide to the tray while `minimizeToTray` is on; the UI keeps the flag
+                // in step whenever that setting changes.
+                platform_window::intercept_close(window, minimize_to_tray);
                 // Re-apply a persisted Mica/Acrylic backdrop (the window was created with the
                 // matching GPUI background, but the DWM backdrop type is set explicitly).
                 let treatment = theme::current_treatment();

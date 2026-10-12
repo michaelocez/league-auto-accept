@@ -26,6 +26,7 @@ use crate::config::store::SettingsStore;
 use crate::notifications::discord::parse_discord_webhook_url;
 use crate::platform::glass;
 use crate::platform::tray::TrayCommand;
+use crate::platform::window as platform_window;
 use crate::ui::components::{
     Button, ButtonVariant, Divider, Elevation, Row, SettingsGroup, Surface, Toggle,
 };
@@ -114,6 +115,8 @@ impl Dashboard {
             }
             Err(error) => log::error!("failed to persist settings: {error}"),
         }
+        // Closing the window follows the setting the UI is showing, not the last successful write.
+        platform_window::set_hide_on_close(self.state.settings.minimize_to_tray);
     }
 
     pub fn apply_event(&mut self, event: AppEvent) -> EventOutcome {
