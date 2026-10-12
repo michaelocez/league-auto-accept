@@ -7,12 +7,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use gpui::base::input::{Input, InputEvent, InputState};
 use gpui::prelude::*;
 use gpui::{
     div, px, ClickEvent, Context, Entity, FocusHandle, IntoElement, Render, Rgba, Subscription,
-    Window,
+    Task, Window,
 };
 use serde_json::json;
 
@@ -32,6 +33,10 @@ use crate::ui::components::{
 use crate::ui::shell::{PageHeader, Screen, Sidebar, TitleBar};
 use crate::ui::theme::{self, Appearance, SurfaceTreatment, Theme};
 
+/// How long a text edit settles before the settings file is written. A write re-encodes the whole
+/// file, so a burst of keystrokes is coalesced into one, as in the reference implementation.
+const SETTINGS_WRITE_DEBOUNCE: Duration = Duration::from_millis(300);
+
 /// Which boolean setting a toggle row switch controls.
 #[derive(Clone, Copy)]
 enum ToggleSetting {
@@ -50,6 +55,8 @@ pub struct Dashboard {
     mention_nickname: Entity<InputState>,
     mention_id: Entity<InputState>,
     mention_error: Option<String>,
+    /// A pending debounced settings write; dropping it cancels the write.
+    pending_write: Option<Task<()>>,
     #[allow(dead_code)]
     subscriptions: Vec<Subscription>,
     screen: Screen,
@@ -75,7 +82,7 @@ impl Dashboard {
             |this, state, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.webhook_draft = state.read(cx).value().to_string();
-                    this.persist(json!({ "discordWebhookUrl": this.webhook_draft.clone() }));
+                    this.schedule_settings_write(cx);
                     cx.notify();
                 }
             },
@@ -94,6 +101,7 @@ impl Dashboard {
             mention_nickname,
             mention_id,
             mention_error: None,
+            pending_write: None,
             subscriptions: vec![subscription],
             screen: Screen::AutoAccept,
             focus_handle: cx.focus_handle(),
@@ -116,10 +124,34 @@ impl Dashboard {
         }
     }
 
+    /// Schedules one settings write [`SETTINGS_WRITE_DEBOUNCE`] after the last text edit. Each call
+    /// replaces the previous task, and dropping a task cancels it, so a burst of keystrokes writes
+    /// the file once.
+    fn schedule_settings_write(&mut self, cx: &mut Context<Self>) {
+        self.pending_write = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(SETTINGS_WRITE_DEBOUNCE)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.flush_settings_write();
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Writes the edited text settings now instead of waiting for the debounce — used by actions
+    /// that must act on what the user just typed (sending a test webhook) and before quitting.
+    pub fn flush_settings_write(&mut self) {
+        self.persist(json!({ "discordWebhookUrl": self.webhook_draft.clone() }));
+    }
+
     pub fn apply_event(&mut self, event: AppEvent) -> EventOutcome {
         match event {
             AppEvent::Tray(TrayCommand::ShowWindow) => return EventOutcome::ShowWindow,
-            AppEvent::Tray(TrayCommand::Quit) => return EventOutcome::Quit,
+            AppEvent::Tray(TrayCommand::Quit) => {
+                self.flush_settings_write();
+                return EventOutcome::Quit;
+            }
             // Handled by the shell (opens the tray popup window); nothing to apply here.
             AppEvent::Tray(TrayCommand::OpenPopup) => {}
             AppEvent::Tray(TrayCommand::ToggleAutoAccept) => {
@@ -429,6 +461,8 @@ impl Dashboard {
                     if this.state.webhook_testing {
                         return;
                     }
+                    // The test must use the URL as typed, even if its debounced write is pending.
+                    this.flush_settings_write();
                     this.state.webhook_test = None;
                     this.state.webhook_testing = true;
                     let _ = this

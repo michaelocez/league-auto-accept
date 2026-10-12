@@ -141,6 +141,8 @@ fn main() {
                             false
                         } else {
                             log::info!("close allowed: exiting application");
+                            // Persist any text edit still waiting on the debounce before exiting.
+                            view_for_close.update(cx, |view, _cx| view.flush_settings_write());
                             true
                         }
                     });
