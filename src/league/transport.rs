@@ -121,6 +121,9 @@ fn tls_config() -> Result<Arc<ClientConfig>, TransportError> {
 }
 
 /// Loopback HTTPS REST client for the LCU.
+///
+/// The public surface is the closed set of calls the application makes; the generic
+/// `request`/`get` helpers are private and endpoints are allowlisted in `league::api`.
 pub struct LcuRestClient {
     credentials: LcuCredentials,
     /// TLS setup is fallible; a failure is surfaced on the first request rather than panicking.
@@ -159,13 +162,13 @@ impl LcuRestClient {
         self.request(&request).await.map(|_| ())
     }
 
-    pub async fn get(&self, endpoint: &str) -> Result<serde_json::Value, TransportError> {
+    async fn get(&self, endpoint: &str) -> Result<serde_json::Value, TransportError> {
         let request =
             LcuRequest::new(HttpMethod::Get, endpoint, None).map_err(TransportError::Request)?;
         self.request(&request).await
     }
 
-    pub async fn request(&self, request: &LcuRequest) -> Result<serde_json::Value, TransportError> {
+    async fn request(&self, request: &LcuRequest) -> Result<serde_json::Value, TransportError> {
         tokio::time::timeout(REQUEST_TIMEOUT, self.request_inner(request))
             .await
             .map_err(|_| TransportError::Timeout)?
