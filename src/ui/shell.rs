@@ -311,31 +311,17 @@ impl RenderOnce for Sidebar {
     }
 }
 
-/// A page's title block, with an optional right-aligned primary action.
+/// A page's title block.
 #[derive(IntoElement)]
 pub struct PageHeader {
     title: SharedString,
-    subtitle: Option<SharedString>,
-    action: Option<gpui::AnyElement>,
 }
 
 impl PageHeader {
     pub fn new(title: impl Into<SharedString>) -> Self {
         Self {
             title: title.into(),
-            subtitle: None,
-            action: None,
         }
-    }
-
-    pub fn subtitle(mut self, subtitle: impl Into<SharedString>) -> Self {
-        self.subtitle = Some(subtitle.into());
-        self
-    }
-
-    pub fn action(mut self, action: impl IntoElement) -> Self {
-        self.action = Some(action.into_any_element());
-        self
     }
 }
 
@@ -344,33 +330,16 @@ impl RenderOnce for PageHeader {
         let t = Theme::of(cx);
         div()
             .flex()
-            .items_start()
-            .justify_between()
-            .gap(theme::space_4())
+            .flex_col()
             .px(theme::space_8())
             .pt(theme::space_6())
             .pb(theme::space_4())
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(theme::text_title())
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(t.text)
-                            .child(self.title),
-                    )
-                    .when_some(self.subtitle, |this, subtitle| {
-                        this.child(
-                            div()
-                                .text_size(theme::text_small())
-                                .text_color(t.text_muted)
-                                .child(subtitle),
-                        )
-                    }),
+                    .text_size(theme::text_title())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t.text)
+                    .child(self.title),
             )
-            .when_some(self.action, |this, action| this.child(action))
     }
 }

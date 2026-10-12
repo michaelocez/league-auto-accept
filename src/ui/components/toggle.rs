@@ -1,6 +1,6 @@
 //! `Toggle`: a token-styled on/off switch whose knob slides and whose colours interpolate via a
 //! GPUI spring, so state changes read as motion rather than an instant flip. The spring also smooths
-//! rapid toggles (momentum is preserved) and the animation respects the system reduce-motion setting.
+//! rapid toggles (momentum is preserved).
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -28,7 +28,6 @@ pub struct Toggle {
     id: ElementId,
     style: StyleRefinement,
     checked: bool,
-    disabled: bool,
     on_change: Option<ChangeHandler>,
 }
 
@@ -38,18 +37,12 @@ impl Toggle {
             id: id.into(),
             style: StyleRefinement::default(),
             checked: false,
-            disabled: false,
             on_change: None,
         }
     }
 
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
-        self
-    }
-
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
         self
     }
 
@@ -74,7 +67,6 @@ impl RenderOnce for Toggle {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = Theme::of(cx);
         let checked = self.checked;
-        let disabled = self.disabled;
 
         // A near-critically-damped spring: quick and smooth, with no visible overshoot.
         let spring = SpringConfig::new(180.0, 26.0, 1.0);
@@ -102,14 +94,11 @@ impl RenderOnce for Toggle {
             .h(px(TRACK_HEIGHT))
             .rounded_full()
             .border_1()
-            .when(disabled, |this| this.opacity(0.5).cursor_default())
-            .when(!disabled, |this| {
-                this.cursor_pointer()
-                    .hover(|style| style.opacity(0.92))
-                    .active(|style| style.opacity(0.85))
-                    .when_some(self.on_change, |this, handler| {
-                        this.on_click(move |event, window, app| handler(event, window, app))
-                    })
+            .cursor_pointer()
+            .hover(|style| style.opacity(0.92))
+            .active(|style| style.opacity(0.85))
+            .when_some(self.on_change, |this, handler| {
+                this.on_click(move |event, window, app| handler(event, window, app))
             })
             .child(knob)
             .refine_style(&self.style);

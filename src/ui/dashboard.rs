@@ -212,7 +212,6 @@ fn activity_color(kind: ActivityKind, t: &Theme) -> Rgba {
     match kind {
         ActivityKind::Info => t.text_muted,
         ActivityKind::Accepted => t.success,
-        ActivityKind::Warning => t.danger,
     }
 }
 

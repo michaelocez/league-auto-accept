@@ -61,10 +61,6 @@ impl LeagueService {
         }
     }
 
-    pub fn enabled_flag(&self) -> Arc<AtomicBool> {
-        self.enabled.clone()
-    }
-
     /// Runs until the containing task is cancelled.
     pub async fn run(&mut self) {
         loop {
