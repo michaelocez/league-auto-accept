@@ -33,9 +33,15 @@ pub enum Effect {
     Lifecycle(Lifecycle),
     /// Perform the one-time snapshot bootstrap for a new connection.
     Bootstrap { generation: u64 },
-    /// Schedule an accept attempt after `delay_ms` (cancels any pending timer first).
-    ScheduleAccept { generation: u64, delay_ms: u64 },
-    /// Cancel the pending accept timer.
+    /// Schedule an accept attempt after `delay_ms`. `timer` identifies this schedule so the
+    /// service can echo it back with the tick: a timer that was cancelled or superseded can then
+    /// never fire an accept, even when the generation is unchanged.
+    ScheduleAccept {
+        generation: u64,
+        timer: u64,
+        delay_ms: u64,
+    },
+    /// Cancel the pending accept timer (identified by the last `ScheduleAccept`).
     CancelTimer,
     /// Perform `POST /lol-matchmaking/v1/ready-check/accept` for `generation`.
     Accept { generation: u64 },
@@ -47,7 +53,10 @@ pub struct ReadyCheckMachine {
     active: bool,
     accepted: bool,
     in_flight: bool,
-    timer_pending: bool,
+    /// Identity of the one accept timer currently scheduled, if any. Cleared on fire or cancel,
+    /// so a superseded timer tick cannot accept.
+    pending_timer: Option<u64>,
+    next_timer: u64,
     attempts: u32,
     generation: u64,
     last_phase: Option<String>,
@@ -74,7 +83,8 @@ impl ReadyCheckMachine {
             active: false,
             accepted: false,
             in_flight: false,
-            timer_pending: false,
+            pending_timer: None,
+            next_timer: 0,
             attempts: 0,
             generation: 0,
             last_phase: None,
@@ -153,7 +163,7 @@ impl ReadyCheckMachine {
             self.active = true;
             self.accepted = false;
             self.in_flight = false;
-            self.timer_pending = false;
+            self.pending_timer = None;
             self.attempts = 0;
             out.push(Effect::Lifecycle(Lifecycle::QueuePopped));
         }
@@ -201,14 +211,21 @@ impl ReadyCheckMachine {
         out
     }
 
-    /// Called by the service when a scheduled accept timer fires.
-    pub fn on_timer_fired(&mut self, generation: u64) -> Vec<Effect> {
+    /// Called by the service when a scheduled accept timer fires. `timer` must be the identity
+    /// handed out by the `ScheduleAccept` that armed it; anything else is a cancelled or
+    /// superseded timer and is ignored.
+    pub fn on_timer_fired(&mut self, generation: u64, timer: u64) -> Vec<Effect> {
         let mut out = Vec::new();
-        if generation != self.generation {
+        if generation != self.generation || self.pending_timer != Some(timer) {
             return out;
         }
-        self.timer_pending = false;
+        self.pending_timer = None;
         if !self.enabled || !self.connected || !self.active || self.accepted || self.in_flight {
+            return out;
+        }
+        // The retry bound is enforced here as well as in `on_accept_result`, so no timer can
+        // ever produce more accept requests than `max_attempts`.
+        if self.attempts >= self.max_attempts {
             return out;
         }
         self.in_flight = true;
@@ -258,24 +275,26 @@ impl ReadyCheckMachine {
         self.active = false;
         self.accepted = false;
         self.in_flight = false;
-        self.timer_pending = false;
+        self.pending_timer = None;
         self.attempts = 0;
     }
 
     fn cancel_timer(&mut self, out: &mut Vec<Effect>) {
-        if self.timer_pending {
-            self.timer_pending = false;
+        if self.pending_timer.take().is_some() {
             out.push(Effect::CancelTimer);
         }
     }
 
     fn schedule_accept(&mut self, delay_ms: u64, out: &mut Vec<Effect>) {
-        if self.timer_pending || self.in_flight || self.accepted || !self.active {
+        if self.pending_timer.is_some() || self.in_flight || self.accepted || !self.active {
             return;
         }
-        self.timer_pending = true;
+        self.next_timer += 1;
+        let timer = self.next_timer;
+        self.pending_timer = Some(timer);
         out.push(Effect::ScheduleAccept {
             generation: self.generation,
+            timer,
             delay_ms,
         });
     }
@@ -356,9 +375,12 @@ mod tests {
         })
     }
 
-    fn schedules(effects: &[Effect]) -> Option<u64> {
+    /// Returns `(generation, timer)` for the scheduled accept, if one was emitted.
+    fn schedules(effects: &[Effect]) -> Option<(u64, u64)> {
         effects.iter().find_map(|effect| match effect {
-            Effect::ScheduleAccept { generation, .. } => Some(*generation),
+            Effect::ScheduleAccept {
+                generation, timer, ..
+            } => Some((*generation, *timer)),
             _ => None,
         })
     }
@@ -373,18 +395,17 @@ mod tests {
     fn coalesces_duplicate_ready_check_events_into_one_accept() {
         let mut machine = connected_machine(true);
         let first = machine.on_ready_check("InProgress", "None");
-        assert!(schedules(&first).is_some());
+        let (generation, timer) = schedules(&first).expect("a timer should be scheduled");
         // Duplicate events while a timer is pending must not schedule another accept.
         assert!(schedules(&machine.on_ready_check("InProgress", "None")).is_none());
         assert!(schedules(&machine.on_ready_check("InProgress", "None")).is_none());
 
-        let generation = machine.generation();
         assert_eq!(
-            accepts(&machine.on_timer_fired(generation)),
+            accepts(&machine.on_timer_fired(generation, timer)),
             Some(generation)
         );
-        // A second timer fire for the same generation must not accept twice.
-        assert!(accepts(&machine.on_timer_fired(generation)).is_none());
+        // The same timer must not accept twice.
+        assert!(accepts(&machine.on_timer_fired(generation, timer)).is_none());
         let result = machine.on_accept_result(generation, true);
         assert!(result.contains(&Effect::Lifecycle(Lifecycle::AutoAccepted)));
     }
@@ -400,19 +421,24 @@ mod tests {
     #[test]
     fn disabling_cancels_a_scheduled_accept() {
         let mut machine = connected_machine(true);
-        machine.on_ready_check("InProgress", "None");
+        let (generation, timer) = schedules(&machine.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
         let disabling = machine.set_enabled(false);
         assert!(disabling.contains(&Effect::CancelTimer));
-        assert!(accepts(&machine.on_timer_fired(machine.generation())).is_none());
+        // The cancelled timer's generation is still current, so only the timer identity can
+        // reject it; without that, turning Auto Accept off would not actually cancel anything.
+        assert_eq!(generation, machine.generation());
+        assert!(accepts(&machine.on_timer_fired(generation, timer)).is_none());
     }
 
     #[test]
     fn disconnecting_cancels_and_returns_to_idle() {
         let mut machine = connected_machine(true);
-        machine.on_ready_check("InProgress", "None");
+        let (generation, timer) = schedules(&machine.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
         let effects = machine.on_connection(false);
         assert!(effects.contains(&Effect::CancelTimer));
-        assert!(accepts(&machine.on_timer_fired(machine.generation())).is_none());
+        assert!(accepts(&machine.on_timer_fired(generation, timer)).is_none());
         assert!(!machine.active);
     }
 
@@ -429,16 +455,16 @@ mod tests {
     #[test]
     fn retries_a_failed_request_once_and_stops_at_the_bound() {
         let mut machine = connected_machine(true);
-        machine.on_ready_check("InProgress", "None");
+        let (generation, first_timer) = schedules(&machine.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
 
         // Attempt 1 fails -> schedule retry.
-        let generation = machine.generation();
-        machine.on_timer_fired(generation);
+        machine.on_timer_fired(generation, first_timer);
         let after_first = machine.on_accept_result(generation, false);
-        assert!(schedules(&after_first).is_some());
+        let (_, retry_timer) = schedules(&after_first).expect("a retry should be scheduled");
 
         // Attempt 2 fails -> error, no further retry.
-        machine.on_timer_fired(generation);
+        machine.on_timer_fired(generation, retry_timer);
         let after_second = machine.on_accept_result(generation, false);
         assert!(schedules(&after_second).is_none());
         assert!(after_second
@@ -449,21 +475,62 @@ mod tests {
     #[test]
     fn succeeds_on_retry() {
         let mut machine = connected_machine(true);
-        machine.on_ready_check("InProgress", "None");
-        let generation = machine.generation();
-        machine.on_timer_fired(generation);
-        machine.on_accept_result(generation, false);
-        machine.on_timer_fired(generation);
+        let (generation, first_timer) = schedules(&machine.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+        machine.on_timer_fired(generation, first_timer);
+        let after_failure = machine.on_accept_result(generation, false);
+        let (_, retry_timer) = schedules(&after_failure).expect("a retry should be scheduled");
+        machine.on_timer_fired(generation, retry_timer);
         let result = machine.on_accept_result(generation, true);
         assert!(result.contains(&Effect::Lifecycle(Lifecycle::AutoAccepted)));
     }
 
     #[test]
+    fn re_enabling_a_pending_ready_check_accepts_once() {
+        let mut machine = connected_machine(true);
+        let (generation, stale_timer) = schedules(&machine.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+
+        // Auto Accept is turned off and back on while the ready check is still pending.
+        machine.set_enabled(false);
+        let re_enabling = machine.set_enabled(true);
+        let (_, fresh_timer) = schedules(&re_enabling).expect("re-enabling arms a fresh timer");
+
+        // The timer armed before the toggle must never accept...
+        assert!(accepts(&machine.on_timer_fired(generation, stale_timer)).is_none());
+        // ...and only the fresh one may, exactly once.
+        assert_eq!(
+            accepts(&machine.on_timer_fired(generation, fresh_timer)),
+            Some(generation)
+        );
+        assert!(accepts(&machine.on_timer_fired(generation, fresh_timer)).is_none());
+    }
+
+    #[test]
+    fn a_timer_armed_after_the_attempt_bound_is_exhausted_cannot_accept() {
+        let mut machine = connected_machine(true);
+        let (generation, first_timer) = schedules(&machine.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+        machine.on_timer_fired(generation, first_timer);
+        let after_failure = machine.on_accept_result(generation, false);
+        let (_, retry_timer) = schedules(&after_failure).expect("a retry should be scheduled");
+        machine.on_timer_fired(generation, retry_timer);
+        let exhausted = machine.on_accept_result(generation, false);
+        assert!(schedules(&exhausted).is_none());
+
+        // Re-enabling re-arms the dead cycle; the bound must still refuse a third request.
+        machine.set_enabled(false);
+        let re_enabling = machine.set_enabled(true);
+        let (_, dead_timer) = schedules(&re_enabling).expect("re-enabling arms a timer");
+        assert!(accepts(&machine.on_timer_fired(generation, dead_timer)).is_none());
+    }
+
+    #[test]
     fn starts_a_fresh_cycle_only_after_the_previous_ready_check_ends() {
         let mut machine = connected_machine(true);
-        machine.on_ready_check("InProgress", "None");
-        let gen = machine.generation();
-        machine.on_timer_fired(gen);
+        let (gen, timer) = schedules(&machine.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+        machine.on_timer_fired(gen, timer);
         machine.on_accept_result(gen, true);
 
         // Still the same cycle: no new queuePopped.
@@ -481,9 +548,9 @@ mod tests {
     #[test]
     fn a_delete_event_without_data_ends_the_cycle() {
         let mut machine = connected_machine(true);
-        machine.on_ready_check("InProgress", "None");
-        let gen = machine.generation();
-        machine.on_timer_fired(gen);
+        let (gen, timer) = schedules(&machine.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
+        machine.on_timer_fired(gen, timer);
         machine.on_accept_result(gen, true);
         machine.on_ready_check("Completed", "");
         assert!(machine
@@ -494,10 +561,10 @@ mod tests {
     #[test]
     fn emits_each_lifecycle_notification_once() {
         let mut machine = connected_machine(true);
+        let (gen, timer) = schedules(&machine.on_ready_check("InProgress", "None"))
+            .expect("a timer should be scheduled");
         machine.on_ready_check("InProgress", "None");
-        machine.on_ready_check("InProgress", "None");
-        let gen = machine.generation();
-        machine.on_timer_fired(gen);
+        machine.on_timer_fired(gen, timer);
         machine.on_accept_result(gen, true);
         machine.on_gameflow_phase("InProgress", true);
         machine.on_gameflow_phase("InProgress", true);
@@ -505,10 +572,11 @@ mod tests {
         // Count across the whole run.
         let mut lifecycle = Vec::new();
         let mut m2 = connected_machine(true);
+        let first = m2.on_ready_check("InProgress", "None");
+        let (g, t) = schedules(&first).expect("a timer should be scheduled");
+        lifecycle.extend(collect_lifecycle(first));
         lifecycle.extend(collect_lifecycle(m2.on_ready_check("InProgress", "None")));
-        lifecycle.extend(collect_lifecycle(m2.on_ready_check("InProgress", "None")));
-        let g = m2.generation();
-        m2.on_timer_fired(g);
+        m2.on_timer_fired(g, t);
         lifecycle.extend(collect_lifecycle(m2.on_accept_result(g, true)));
         lifecycle.extend(collect_lifecycle(m2.on_gameflow_phase("InProgress", true)));
         lifecycle.extend(collect_lifecycle(m2.on_gameflow_phase("InProgress", true)));

@@ -25,15 +25,82 @@ pub enum ServiceEvent {
 }
 
 enum MachineInput {
-    TimerFired(u64),
+    TimerFired { generation: u64, timer: u64 },
     AcceptResult { generation: u64, ok: bool },
+}
+
+/// The state-machine half of a connection attempt: the ready-check machine plus the shared Auto
+/// Accept flag.
+///
+/// Every transition reconciles the flag first, so a toggle is honoured at the next decision
+/// instead of waiting for the discovery poll. Kept separate from the transport loop so the
+/// connection lifecycle (connect, events, timer ticks, disconnect) is testable without an LCU.
+struct MachineSession {
+    machine: ReadyCheckMachine,
+    enabled: Arc<AtomicBool>,
+}
+
+impl MachineSession {
+    fn new(enabled: Arc<AtomicBool>) -> Self {
+        let initial = enabled.load(Ordering::Relaxed);
+        Self {
+            machine: ReadyCheckMachine::new(initial),
+            enabled,
+        }
+    }
+
+    /// Applies a runtime Auto Accept change; a no-op while the flag is unchanged.
+    fn sync_enabled(&mut self) -> Vec<Effect> {
+        let wanted = self.enabled.load(Ordering::Relaxed);
+        if wanted == self.machine.enabled() {
+            Vec::new()
+        } else {
+            self.machine.set_enabled(wanted)
+        }
+    }
+
+    fn on_connection(&mut self, connected: bool) -> Vec<Effect> {
+        let mut out = self.machine.on_connection(connected);
+        if connected {
+            out.extend(self.sync_enabled());
+        }
+        out
+    }
+
+    fn on_ready_check(&mut self, state: &str, player_response: &str) -> Vec<Effect> {
+        let mut out = self.sync_enabled();
+        out.extend(self.machine.on_ready_check(state, player_response));
+        out
+    }
+
+    fn on_gameflow_phase(&mut self, phase: &str, emit: bool) -> Vec<Effect> {
+        let mut out = self.sync_enabled();
+        out.extend(self.machine.on_gameflow_phase(phase, emit));
+        out
+    }
+
+    /// The accept decision point: the live flag is read here, immediately before the machine
+    /// decides whether to request an accept.
+    fn on_timer_fired(&mut self, generation: u64, timer: u64) -> Vec<Effect> {
+        let mut out = self.sync_enabled();
+        out.extend(self.machine.on_timer_fired(generation, timer));
+        out
+    }
+
+    fn on_accept_result(&mut self, generation: u64, ok: bool) -> Vec<Effect> {
+        let mut out = self.sync_enabled();
+        out.extend(self.machine.on_accept_result(generation, ok));
+        out
+    }
 }
 
 pub struct LeagueService {
     locator: ClientLocator,
-    machine: ReadyCheckMachine,
+    session: MachineSession,
     enabled: Arc<AtomicBool>,
     tx: async_channel::Sender<ServiceEvent>,
+    /// The one scheduled accept timer, so a cancellation genuinely cancels it.
+    timer_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LeagueService {
@@ -52,12 +119,12 @@ impl LeagueService {
         enabled: Arc<AtomicBool>,
         tx: async_channel::Sender<ServiceEvent>,
     ) -> Self {
-        let initial = enabled.load(Ordering::Relaxed);
         Self {
             locator,
-            machine: ReadyCheckMachine::new(initial),
+            session: MachineSession::new(enabled.clone()),
             enabled,
             tx,
+            timer_task: None,
         }
     }
 
@@ -98,7 +165,7 @@ impl LeagueService {
 
         let (input_tx, input_rx) = async_channel::unbounded::<MachineInput>();
 
-        let effects = self.machine.on_connection(true);
+        let effects = self.session.on_connection(true);
         self.handle_effects(effects, Some(&rest), Some(&input_tx));
 
         self.bootstrap(&rest, &input_tx).await;
@@ -113,11 +180,11 @@ impl LeagueService {
                 input = input_rx.recv() => {
                     if let Ok(input) = input {
                         let effects = match input {
-                            MachineInput::TimerFired(generation) => {
-                                self.machine.on_timer_fired(generation)
+                            MachineInput::TimerFired { generation, timer } => {
+                                self.session.on_timer_fired(generation, timer)
                             }
                             MachineInput::AcceptResult { generation, ok } => {
-                                self.machine.on_accept_result(generation, ok)
+                                self.session.on_accept_result(generation, ok)
                             }
                         };
                         self.handle_effects(effects, Some(&rest), Some(&input_tx));
@@ -129,10 +196,10 @@ impl LeagueService {
                             if let Some(input) = parse_text_event(&text) {
                                 let effects = match input {
                                     LcuEvent::ReadyCheck { state, player_response } => {
-                                        self.machine.on_ready_check(&state, &player_response)
+                                        self.session.on_ready_check(&state, &player_response)
                                     }
                                     LcuEvent::GameflowPhase { phase } => {
-                                        self.machine.on_gameflow_phase(&phase, true)
+                                        self.session.on_gameflow_phase(&phase, true)
                                     }
                                 };
                                 self.handle_effects(effects, Some(&rest), Some(&input_tx));
@@ -145,7 +212,8 @@ impl LeagueService {
                     }
                 }
                 _ = poll.tick() => {
-                    self.sync_enabled(Some(&rest), Some(&input_tx));
+                    let effects = self.session.sync_enabled();
+                    self.handle_effects(effects, Some(&rest), Some(&input_tx));
                     match self.locator.find_running_client() {
                         None => {
                             self.emit(ServiceEvent::Connection { connected: false });
@@ -161,7 +229,7 @@ impl LeagueService {
             }
         }
 
-        let effects = self.machine.on_connection(false);
+        let effects = self.session.on_connection(false);
         self.handle_effects(effects, Some(&rest), Some(&input_tx));
     }
 
@@ -172,7 +240,7 @@ impl LeagueService {
     ) {
         // Snapshots are best-effort; live events remain authoritative.
         if let Ok(phase) = rest.get_gameflow_phase().await {
-            let effects = self.machine.on_gameflow_phase(&phase, false);
+            let effects = self.session.on_gameflow_phase(&phase, false);
             self.handle_effects(effects, Some(rest), Some(input_tx));
         }
         if let Ok(value) = rest.get_ready_check().await {
@@ -182,27 +250,14 @@ impl LeagueService {
                     .get("playerResponse")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let effects = self.machine.on_ready_check(state, player_response);
+                let effects = self.session.on_ready_check(state, player_response);
                 self.handle_effects(effects, Some(rest), Some(input_tx));
             }
         }
     }
 
-    /// Applies a runtime Auto Accept enable change to the state machine.
-    fn sync_enabled(
-        &mut self,
-        rest: Option<&Arc<LcuRestClient>>,
-        input_tx: Option<&async_channel::Sender<MachineInput>>,
-    ) {
-        let wanted = self.enabled.load(Ordering::Relaxed);
-        if wanted != self.machine.enabled() {
-            let effects = self.machine.set_enabled(wanted);
-            self.handle_effects(effects, rest, input_tx);
-        }
-    }
-
     fn disconnect(&mut self) {
-        let effects = self.machine.on_connection(false);
+        let effects = self.session.on_connection(false);
         // No REST client is needed to unwind a connection; effects here are only state/idle.
         self.handle_effects(effects, None, None);
         self.emit(ServiceEvent::Connection { connected: false });
@@ -224,21 +279,34 @@ impl LeagueService {
                 }
                 // Bootstrap is driven explicitly by `bootstrap`.
                 Effect::Bootstrap { .. } => {}
-                // Timers/accepts are generation-guarded by the machine, so a fired-but-stale
-                // timer or result is ignored rather than needing true cancellation.
-                Effect::CancelTimer => {}
+                // The machine invalidates a cancelled timer by identity, so a tick that has
+                // already been sent is ignored on arrival; aborting the sleeping task here
+                // additionally avoids keeping it alive.
+                Effect::CancelTimer => {
+                    if let Some(task) = self.timer_task.take() {
+                        task.abort();
+                    }
+                }
                 Effect::ScheduleAccept {
                     generation,
+                    timer,
                     delay_ms,
                 } => {
                     let Some(input_tx) = input_tx else {
                         continue;
                     };
+                    // Only one timer is ever pending; aborting a leftover handle is a guard
+                    // against an unexpectedly overlapping schedule.
+                    if let Some(previous) = self.timer_task.take() {
+                        previous.abort();
+                    }
                     let input_tx = input_tx.clone();
-                    tokio::spawn(async move {
+                    self.timer_task = Some(tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                        let _ = input_tx.send(MachineInput::TimerFired(generation)).await;
-                    });
+                        let _ = input_tx
+                            .send(MachineInput::TimerFired { generation, timer })
+                            .await;
+                    }));
                 }
                 Effect::Accept { generation } => {
                     let (Some(rest), Some(input_tx)) = (rest, input_tx) else {
@@ -247,8 +315,11 @@ impl LeagueService {
                     };
                     let rest = rest.clone();
                     let input_tx = input_tx.clone();
+                    let enabled = self.enabled.clone();
                     tokio::spawn(async move {
-                        let ok = rest.accept().await.is_ok();
+                        // Read the live flag at the last possible moment: a toggle that lands
+                        // after the timer fired must still prevent the request.
+                        let ok = enabled.load(Ordering::Relaxed) && rest.accept().await.is_ok();
                         let _ = input_tx
                             .send(MachineInput::AcceptResult { generation, ok })
                             .await;
