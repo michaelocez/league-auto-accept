@@ -77,6 +77,11 @@ impl SettingsStore {
     }
 
     /// Applies a partial patch, persists, and returns the new settings.
+    ///
+    /// The patch is merged into the in-memory settings *before* the file is written, so when the
+    /// write is refused — a read-only or sandboxed settings directory, for example —
+    /// [`SettingsStore::snapshot`] still holds the user's intent and the caller can apply it for the
+    /// session instead of dropping it silently.
     pub fn update(&mut self, patch: &Value) -> Result<AppSettings, StoreError> {
         self.settings = merge_settings(&self.settings, patch);
         self.save()?;
@@ -117,9 +122,21 @@ impl SettingsStore {
         }
         let temporary = self.path.with_extension("json.tmp");
         std::fs::write(&temporary, text)?;
-        std::fs::rename(&temporary, &self.path)?;
+        if let Err(error) = std::fs::rename(&temporary, &self.path) {
+            // A refused atomic replace must not leave a stale temporary file behind.
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
         Ok(())
     }
+}
+
+/// The user-facing explanation when settings could not be written.
+pub fn save_error_message(path: &Path, error: &StoreError) -> String {
+    format!(
+        "Settings could not be saved to {} — {error}. Your changes apply until the app closes.",
+        path.display()
+    )
 }
 
 /// Default per-user settings directory (`%APPDATA%\League Auto Accept`).
@@ -258,5 +275,43 @@ mod tests {
             .unwrap();
         assert_eq!(reloaded.theme_mode, ThemeMode::Light);
         assert_eq!(reloaded.window_backdrop, BackdropMode::Mica);
+    }
+
+    /// Windows refuses to replace a read-only file, which is the same refusal a sandboxed or
+    /// locked-down settings directory produces.
+    #[cfg(windows)]
+    #[test]
+    fn keeps_the_change_in_memory_when_the_write_is_refused() {
+        use crate::config::settings::ThemeMode;
+
+        let root = tempdir().unwrap();
+        let mut store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+        store.load().unwrap();
+
+        let path = root.path().join(SETTINGS_FILE_NAME);
+        let original = std::fs::metadata(&path).unwrap().permissions();
+        let mut read_only = original.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(&path, read_only).unwrap();
+
+        let error = store
+            .update(&json!({ "autoAcceptEnabled": true }))
+            .expect_err("a read-only settings file cannot be replaced");
+        assert!(matches!(error, StoreError::Io(_)));
+        // The change survives in memory even though it could not be written.
+        assert!(store.snapshot().auto_accept_enabled);
+        // A refused write leaves no temporary file behind.
+        assert!(!root.path().join("settings.json.tmp").exists());
+
+        std::fs::set_permissions(&path, original).unwrap();
+
+        store
+            .update(&json!({ "themeMode": "light" }))
+            .expect("the file can be written again");
+        let reloaded = SettingsStore::new(root.path(), Box::new(FakeCodec))
+            .load()
+            .unwrap();
+        assert!(reloaded.auto_accept_enabled);
+        assert_eq!(reloaded.theme_mode, ThemeMode::Light);
     }
 }

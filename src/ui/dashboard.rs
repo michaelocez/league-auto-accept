@@ -22,7 +22,7 @@ use crate::app::state::{ActivityKind, AppState};
 use crate::config::settings::{
     is_valid_discord_id, AppSettings, BackdropMode, DiscordMention, ThemeMode, MAX_DISCORD_USER_IDS,
 };
-use crate::config::store::SettingsStore;
+use crate::config::store::{save_error_message, SettingsStore};
 use crate::notifications::discord::parse_discord_webhook_url;
 use crate::platform::glass;
 use crate::platform::tray::TrayCommand;
@@ -105,14 +105,25 @@ impl Dashboard {
     }
 
     fn persist(&mut self, patch: serde_json::Value) {
-        match self.store.borrow_mut().update(&patch) {
-            Ok(updated) => {
-                self.state.settings = updated.clone();
-                if let Ok(mut guard) = self.settings_shared.write() {
-                    *guard = updated;
-                }
+        let outcome = self.store.borrow_mut().update(&patch);
+        // `update` merges the patch before writing, so the store's snapshot is the user's intent
+        // even when the file could not be written. Apply it either way: a refused write must not
+        // make the controls look dead, it must only be reported.
+        let updated = self.store.borrow().snapshot();
+        self.state.settings = updated.clone();
+        if let Ok(mut guard) = self.settings_shared.write() {
+            *guard = updated;
+        }
+        match outcome {
+            Ok(_) => self.state.settings_error = None,
+            Err(error) => {
+                let message = {
+                    let store = self.store.borrow();
+                    save_error_message(store.path(), &error)
+                };
+                log::error!("{message}");
+                self.state.settings_error = Some(message);
             }
-            Err(error) => log::error!("failed to persist settings: {error}"),
         }
     }
 
@@ -898,7 +909,31 @@ impl Render for Dashboard {
                                 .overflow_y_scroll()
                                 .px(theme::space_8())
                                 .pb(theme::space_8())
-                                .child(div().flex().flex_col().flex_shrink_0().child(body)),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .flex_shrink_0()
+                                        .when_some(
+                                            self.state.settings_error.clone(),
+                                            |this, message| {
+                                                this.child(
+                                                    div()
+                                                        .mb(theme::space_5())
+                                                        .px(theme::space_4())
+                                                        .py(theme::space_3())
+                                                        .bg(t.surface)
+                                                        .border_1()
+                                                        .border_color(t.danger)
+                                                        .rounded(theme::radius_md())
+                                                        .text_size(theme::text_small())
+                                                        .text_color(t.danger)
+                                                        .child(message),
+                                                )
+                                            },
+                                        )
+                                        .child(body),
+                                ),
                         ),
                 ),
             )
