@@ -1,7 +1,7 @@
 use crate::config::settings::AppSettings;
 use crate::league::ready_check::{Lifecycle, Status as LeagueStatus};
 use crate::league::service::ServiceEvent;
-use crate::notifications::discord::WebhookResult;
+use crate::notifications::discord::{WebhookResult, WebhookStatus};
 
 /// A recent activity entry shown on the dashboard.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +62,9 @@ impl ReadyCheckStatus {
 }
 
 /// The single authoritative application state. Both the window and the tray derive from this.
+///
+/// It holds no secret: the Discord webhook URL lives in the settings store and the notification
+/// sender, and only its [`WebhookStatus`] reaches this state.
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub settings: AppSettings,
@@ -70,6 +73,8 @@ pub struct AppState {
     pub ready_check_message: String,
     /// Recent lifecycle activity, newest first (bounded).
     pub activity: Vec<ActivityItem>,
+    /// Non-secret status of the saved Discord webhook.
+    pub webhook_status: WebhookStatus,
     /// Last Test Webhook result, if any.
     pub webhook_test: Option<WebhookResult>,
     /// Whether a Test Webhook request is in flight.
@@ -77,13 +82,14 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(settings: AppSettings) -> Self {
+    pub fn new(settings: AppSettings, webhook_status: WebhookStatus) -> Self {
         Self {
             settings,
             connection: ConnectionStatus::Connecting,
             ready_check: ReadyCheckStatus::Idle,
             ready_check_message: "Waiting for a ready check.".to_string(),
             activity: Vec::new(),
+            webhook_status,
             webhook_test: None,
             webhook_testing: false,
         }
@@ -146,7 +152,7 @@ mod tests {
 
     #[test]
     fn never_reports_active_unless_enabled_and_connected() {
-        let mut state = AppState::new(AppSettings::default());
+        let mut state = AppState::new(AppSettings::default(), WebhookStatus::default());
 
         state.connection = ConnectionStatus::Connected;
         assert_eq!(state.summary(), "Disabled");
@@ -164,7 +170,7 @@ mod tests {
 
     #[test]
     fn maps_service_events_and_bounds_activity() {
-        let mut state = AppState::new(AppSettings::default());
+        let mut state = AppState::new(AppSettings::default(), WebhookStatus::default());
 
         state.apply_service_event(&ServiceEvent::Connection { connected: true });
         assert_eq!(state.connection, ConnectionStatus::Connected);
@@ -182,5 +188,17 @@ mod tests {
             state.apply_service_event(&ServiceEvent::Lifecycle(Lifecycle::GameStarted));
         }
         assert_eq!(state.activity.len(), MAX_ACTIVITY);
+    }
+
+    #[test]
+    fn application_state_never_carries_the_webhook_secret() {
+        let secret = crate::notifications::discord::WebhookSecret::new(
+            "https://discord.com/api/webhooks/12345678901234567/secret-token-value",
+        );
+        let state = AppState::new(AppSettings::default(), secret.status());
+
+        assert!(state.webhook_status.configured);
+        let rendered = format!("{state:?}");
+        assert!(!rendered.contains("secret-token-value"), "{rendered}");
     }
 }
