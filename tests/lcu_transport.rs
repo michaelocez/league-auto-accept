@@ -24,13 +24,13 @@ use league_auto_accept::league::transport::{LcuEventSocket, LcuRestClient, Socke
 const PASSWORD: &str = "local-secret";
 
 fn credentials(port: u16) -> LcuCredentials {
-    LcuCredentials {
-        install_path: PathBuf::new(),
-        process_name: "LeagueClientUx".into(),
-        process_id: 1,
+    LcuCredentials::new(
+        PathBuf::new(),
+        "LeagueClientUx".into(),
+        1,
         port,
-        password: PASSWORD.into(),
-    }
+        PASSWORD.into(),
+    )
 }
 
 fn expected_authorization() -> String {
