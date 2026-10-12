@@ -40,6 +40,8 @@ fn main() {
     let store = Rc::new(RefCell::new(SettingsStore::with_directory(
         &default_settings_directory(),
     )));
+    // Say where settings live: a refused write is otherwise only reported as an I/O error.
+    log::info!("settings file: {}", store.borrow().path().display());
     let settings = store.borrow_mut().load().unwrap_or_else(|error| {
         log::error!("failed to load settings, using defaults: {error}");
         Default::default()
