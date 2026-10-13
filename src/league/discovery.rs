@@ -36,23 +36,31 @@ impl ClientLocator {
         }
     }
 
-    /// Finds credentials for a running client, if its lockfile exists.
-    pub fn find_running_client(&self) -> Option<LcuCredentials> {
+    /// Finds credentials for every running client, in discovery order.
+    ///
+    /// More than one installation can be running (live and PBE, for example), and a listed
+    /// installation can have a lockfile while its client is gone or unresponsive, so the caller
+    /// decides which credentials to use instead of taking the first parseable lockfile.
+    pub fn find_running_clients(&self) -> Vec<LcuCredentials> {
+        let mut clients: Vec<LcuCredentials> = Vec::new();
         for install_path in self.discover_install_paths() {
-            let lockfile_path = install_path.join("lockfile");
-            let Ok(metadata) = std::fs::metadata(&lockfile_path) else {
+            let Some(credentials) = read_lockfile(&install_path) else {
                 continue;
             };
-            if metadata.len() > MAX_LOCKFILE_BYTES {
+            if clients
+                .iter()
+                .any(|known| known.signature() == credentials.signature())
+            {
                 continue;
             }
-            if let Ok(contents) = std::fs::read_to_string(&lockfile_path) {
-                if let Some(credentials) = parse_lockfile(&contents, &install_path) {
-                    return Some(credentials);
-                }
-            }
+            clients.push(credentials);
         }
-        None
+        clients
+    }
+
+    /// Finds credentials for a running client, if its lockfile exists.
+    pub fn find_running_client(&self) -> Option<LcuCredentials> {
+        self.find_running_clients().into_iter().next()
     }
 
     /// Returns the ordered, de-duplicated list of League installation directories.
@@ -124,6 +132,21 @@ fn normalise_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     let trimmed = trimmed.replace('/', "\\");
     PathBuf::from(trimmed)
+}
+
+/// Reads an installation's lockfile, if one is there and parses.
+///
+/// League rewrites its lockfile in place, so a read can land mid-write and yield something that
+/// parses as nothing. Callers that need to tell that apart from a client that exited check whether
+/// the file is still there.
+fn read_lockfile(install_path: &Path) -> Option<LcuCredentials> {
+    let lockfile_path = install_path.join("lockfile");
+    let metadata = std::fs::metadata(&lockfile_path).ok()?;
+    if metadata.len() > MAX_LOCKFILE_BYTES {
+        return None;
+    }
+    let contents = std::fs::read_to_string(&lockfile_path).ok()?;
+    parse_lockfile(&contents, install_path)
 }
 
 fn is_league_install(path: &Path) -> bool {
@@ -254,6 +277,34 @@ mod tests {
             vec![forward, install_path.clone()],
         );
         assert_eq!(locator.discover_install_paths().len(), 1);
+    }
+
+    #[test]
+    fn returns_every_running_installation_and_skips_one_without_a_usable_lockfile() {
+        let root = tempdir().unwrap();
+        let live = root.path().join("Live");
+        let pbe = root.path().join("Pbe");
+        fs::create_dir_all(&live).unwrap();
+        fs::create_dir_all(&pbe).unwrap();
+        fs::write(live.join("LeagueClientUx.exe"), "").unwrap();
+        fs::write(pbe.join("LeagueClientUx.exe"), "").unwrap();
+        fs::write(
+            live.join("lockfile"),
+            "LeagueClientUx:1234:54321:live-secret:https",
+        )
+        .unwrap();
+        // Caught mid-write: present, but not yet parseable.
+        fs::write(pbe.join("lockfile"), "LeagueClientUx:9999").unwrap();
+
+        let locator = ClientLocator::new(
+            Some(root.path().join("empty-metadata")),
+            vec![live.clone(), pbe.clone()],
+        );
+        let clients = locator.find_running_clients();
+
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].install_path, live);
+        assert!(locator.find_running_client().is_some());
     }
 
     #[test]
