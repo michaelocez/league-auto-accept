@@ -15,6 +15,8 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 
+use crate::config::settings::{allowed_mention_ids, DiscordMention};
+
 const ALLOWED_HOSTS: [&str; 4] = [
     "discord.com",
     "canary.discord.com",
@@ -134,6 +136,23 @@ pub fn render_notification_message(template: &str, user_ids: &[String]) -> Strin
     template.replace("{mentions}", &mentions).trim().to_string()
 }
 
+/// Renders exactly what a notification would send for `template`, for the local preview.
+///
+/// Pure and network-free: it applies the same mention allowlist and cap as the sender, so the
+/// preview cannot drift from the delivered message.
+pub fn preview_notification(template: &str, mentions: &[DiscordMention]) -> String {
+    render_notification_message(template, &allowed_mention_ids(mentions))
+}
+
+/// Message-length rule shared by the sender and the preview: 1–2,000 characters.
+pub fn content_error(content: &str) -> Option<&'static str> {
+    if content.trim().is_empty() || content.chars().count() > MAX_CONTENT_LENGTH {
+        Some("The Discord message must contain 1–2,000 characters.")
+    } else {
+        None
+    }
+}
+
 /// Builds the Discord payload with automatic parsing disabled and only explicit IDs allowed.
 pub fn discord_webhook_payload(content: &str, user_ids: &[String]) -> String {
     serde_json::json!({
@@ -187,10 +206,8 @@ impl DiscordSender for DiscordWebhookClient {
                 return WebhookResult::failure("Enter a valid Discord webhook URL.");
             };
             let content = request.content.trim();
-            if content.is_empty() || content.chars().count() > MAX_CONTENT_LENGTH {
-                return WebhookResult::failure(
-                    "The Discord message must contain 1–2,000 characters.",
-                );
+            if let Some(message) = content_error(&request.content) {
+                return WebhookResult::failure(message);
             }
             if !request
                 .user_ids
@@ -359,5 +376,35 @@ mod tests {
             render_notification_message("no placeholder", &ids),
             "no placeholder"
         );
+    }
+
+    #[test]
+    fn preview_renders_the_sent_message_with_the_mention_cap_applied() {
+        let mentions: Vec<DiscordMention> = (0..7)
+            .map(|index| DiscordMention {
+                id: format!("{:017}", index + 1),
+                nickname: String::new(),
+            })
+            .collect();
+
+        let preview = preview_notification("{mentions} your queue has popped.", &mentions);
+        assert_eq!(
+            preview.matches("<@").count(),
+            crate::config::settings::MAX_DISCORD_USER_IDS
+        );
+        assert!(preview.ends_with("your queue has popped."));
+        assert_eq!(
+            preview_notification("no placeholder", &mentions),
+            "no placeholder"
+        );
+    }
+
+    #[test]
+    fn content_error_flags_only_empty_and_oversized_messages() {
+        assert!(content_error("").is_some());
+        assert!(content_error("   ").is_some());
+        assert!(content_error("hello").is_none());
+        assert!(content_error(&"x".repeat(MAX_CONTENT_LENGTH)).is_none());
+        assert!(content_error(&"x".repeat(MAX_CONTENT_LENGTH + 1)).is_some());
     }
 }

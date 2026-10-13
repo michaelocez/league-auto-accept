@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::config::settings::AppSettings;
+use crate::config::settings::{allowed_mention_ids, AppSettings};
 use crate::league::ready_check::Lifecycle;
 
 use super::discord::{render_notification_message, DiscordSender, WebhookFuture, WebhookRequest};
@@ -60,11 +60,10 @@ impl NotificationService {
     }
 
     fn dispatch(&self, settings: &AppSettings, template: &str) -> WebhookFuture {
-        let user_ids: Vec<String> = settings
-            .discord_mentions
-            .iter()
-            .map(|mention| mention.id.clone())
-            .collect();
+        // Re-apply the mention allowlist and cap at send time: settings are normalised when they
+        // are written, but the delivered message must never exceed the cap regardless of how the
+        // snapshot was produced.
+        let user_ids = allowed_mention_ids(&settings.discord_mentions);
         let content = render_notification_message(template, &user_ids);
         self.sender.send(WebhookRequest {
             url: settings.discord_webhook_url.clone(),
@@ -77,7 +76,8 @@ impl NotificationService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::notifications::discord::{WebhookResult, MAX_CONTENT_LENGTH};
+    use crate::config::settings::{DiscordMention, MAX_DISCORD_USER_IDS};
+    use crate::notifications::discord::WebhookResult;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -179,6 +179,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn caps_mentions_at_send_time_even_for_an_unnormalised_snapshot() {
+        let mut current = settings();
+        let mut mentions: Vec<DiscordMention> = (0..7)
+            .map(|index| DiscordMention {
+                id: format!("{:017}", index + 1),
+                nickname: String::new(),
+            })
+            .collect();
+        mentions.push(DiscordMention {
+            id: "12345678901234567".into(), // duplicate of the first entry
+            nickname: String::new(),
+        });
+        mentions.push(DiscordMention {
+            id: "not-an-id".into(),
+            nickname: String::new(),
+        });
+        current.discord_mentions = mentions;
+        current.notification_messages.queue_popped = "{mentions}".into();
+
+        let sender = Arc::new(FakeSender::default());
+        let service = service(current, sender.clone());
+        assert!(service.notification_for(Lifecycle::QueuePopped).is_some());
+
+        let requests = sender.requests.lock().unwrap();
+        assert_eq!(requests[0].user_ids.len(), MAX_DISCORD_USER_IDS);
+        assert_eq!(requests[0].user_ids[0], "00000000000000001");
+        assert_eq!(
+            requests[0].content,
+            "<@00000000000000001> <@00000000000000002> <@00000000000000003> <@00000000000000004> <@00000000000000005>"
+        );
+        assert!(!requests[0].content.contains("not-an-id"));
+    }
+
+    #[tokio::test]
     async fn delivery_failure_is_returned_not_panicked() {
         let sender = Arc::new(FakeSender {
             requests: Mutex::new(Vec::new()),
@@ -190,6 +224,6 @@ mod tests {
             .expect("enabled");
         let result = future.await;
         assert!(!result.ok);
-        assert!(result.message.chars().count() <= MAX_CONTENT_LENGTH + 64);
+        assert_eq!(result.message, "Discord webhook request failed.");
     }
 }

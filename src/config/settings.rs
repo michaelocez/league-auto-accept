@@ -255,6 +255,26 @@ fn push_mention(output: &mut Vec<DiscordMention>, id: &str, nickname: &str) {
     });
 }
 
+/// The mention ids a notification may actually use: trimmed, valid, de-duplicated and capped at
+/// [`MAX_DISCORD_USER_IDS`].
+///
+/// Normalisation applies these rules when settings are written; the notification sender applies
+/// them again so a notification can never mention more people than the cap.
+pub fn allowed_mention_ids(mentions: &[DiscordMention]) -> Vec<String> {
+    let mut output: Vec<String> = Vec::new();
+    for mention in mentions {
+        if output.len() >= MAX_DISCORD_USER_IDS {
+            break;
+        }
+        let id = mention.id.trim();
+        if !is_valid_discord_id(id) || output.iter().any(|existing| existing == id) {
+            continue;
+        }
+        output.push(id.to_string());
+    }
+    output
+}
+
 /// A Discord user ID is 17–20 ASCII digits.
 pub fn is_valid_discord_id(value: &str) -> bool {
     let len = value.len();
@@ -401,6 +421,42 @@ mod tests {
         assert!(is_valid_discord_id("12345678901234567890"));
         assert!(!is_valid_discord_id("1234"));
         assert!(!is_valid_discord_id("1234567890123456a"));
+    }
+
+    #[test]
+    fn allowlisted_mention_ids_are_valid_unique_and_capped() {
+        let mentions: Vec<DiscordMention> = (0..8)
+            .map(|index| DiscordMention {
+                id: format!("{:017}", index + 1),
+                nickname: format!("Player {}", index + 1),
+            })
+            .collect();
+        let ids = allowed_mention_ids(&mentions);
+        assert_eq!(ids.len(), MAX_DISCORD_USER_IDS);
+        assert_eq!(ids[0], "00000000000000001");
+
+        let with_junk = vec![
+            DiscordMention {
+                id: format!(" {} ", "1".repeat(17)),
+                nickname: String::new(),
+            },
+            DiscordMention {
+                id: "1".repeat(17),
+                nickname: String::new(),
+            }, // duplicate after trimming
+            DiscordMention {
+                id: "not-an-id".into(),
+                nickname: String::new(),
+            },
+            DiscordMention {
+                id: "2".repeat(20),
+                nickname: String::new(),
+            },
+        ];
+        assert_eq!(
+            allowed_mention_ids(&with_junk),
+            vec!["1".repeat(17), "2".repeat(20)]
+        );
     }
 
     #[test]
