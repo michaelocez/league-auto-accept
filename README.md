@@ -68,6 +68,11 @@ by the notification sender. It is never part of application state, the tray or t
 window shows only whether a webhook is configured and its host. Your theme and window backdrop are
 stored here too, so they are restored on next launch.
 
+The app must be able to write that file. If the write is refused — the directory is read-only, or the
+app was started from a sandboxed/low-integrity context — the change still takes effect for the
+session and the Settings and Notifications pages show a banner naming the file and the error, so
+nothing fails silently. Run the app from an ordinary user session to persist changes.
+
 ## Requirements
 
 - Windows 10/11 (x64).
