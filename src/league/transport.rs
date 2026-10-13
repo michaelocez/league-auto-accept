@@ -7,6 +7,7 @@
 //! The WebSocket path uses the project's strict `WebSocketFrameDecoder` rather than a generic
 //! client, which gives explicit malformed-frame handling.
 
+use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,8 +26,8 @@ use super::api::{HttpMethod, LcuRequest, LcuRequestError};
 use super::frame::{encode_masked, DecodedFrame, WebSocketFrameDecoder};
 use super::lockfile::LcuCredentials;
 use super::{
-    EVENT_SUBSCRIPTION_FRAME, GAMEFLOW_ENDPOINT, LCU_USERNAME, READY_CHECK_ACCEPT_ENDPOINT,
-    READY_CHECK_ENDPOINT, SUMMONER_ENDPOINT,
+    EVENT_SUBSCRIPTION_FRAME, GAMEFLOW_ENDPOINT, READY_CHECK_ACCEPT_ENDPOINT, READY_CHECK_ENDPOINT,
+    SUMMONER_ENDPOINT,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,6 +35,11 @@ const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
 const MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
+/// How long the event socket may stay silent before the client sends a keepalive ping.
+const EVENT_IDLE_PING: Duration = Duration::from_secs(30);
+/// How long the client waits for any data after a keepalive ping before treating the socket as
+/// half-open and reporting a timeout, so the service can reconnect.
+const EVENT_PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 #[derive(Debug)]
@@ -120,13 +126,10 @@ fn tls_config() -> Result<Arc<ClientConfig>, TransportError> {
     Ok(Arc::new(config))
 }
 
-fn authorization(credentials: &LcuCredentials) -> String {
-    let token = base64::engine::general_purpose::STANDARD
-        .encode(format!("{}:{}", LCU_USERNAME, credentials.password));
-    format!("Basic {token}")
-}
-
 /// Loopback HTTPS REST client for the LCU.
+///
+/// The public surface is the closed set of calls the application makes; the generic
+/// `request`/`get` helpers are private and endpoints are allowlisted in `league::api`.
 pub struct LcuRestClient {
     credentials: LcuCredentials,
     /// TLS setup is fallible; a failure is surfaced on the first request rather than panicking.
@@ -165,13 +168,13 @@ impl LcuRestClient {
         self.request(&request).await.map(|_| ())
     }
 
-    pub async fn get(&self, endpoint: &str) -> Result<serde_json::Value, TransportError> {
+    async fn get(&self, endpoint: &str) -> Result<serde_json::Value, TransportError> {
         let request =
             LcuRequest::new(HttpMethod::Get, endpoint, None).map_err(TransportError::Request)?;
         self.request(&request).await
     }
 
-    pub async fn request(&self, request: &LcuRequest) -> Result<serde_json::Value, TransportError> {
+    async fn request(&self, request: &LcuRequest) -> Result<serde_json::Value, TransportError> {
         tokio::time::timeout(REQUEST_TIMEOUT, self.request_inner(request))
             .await
             .map_err(|_| TransportError::Timeout)?
@@ -202,7 +205,7 @@ impl LcuRestClient {
             request.method.as_str(),
             request.endpoint,
             self.credentials.port,
-            authorization(&self.credentials),
+            self.credentials.authorization(),
         );
         if let Some(body) = &request.body {
             head.push_str(&format!(
@@ -256,6 +259,17 @@ impl LcuRestClient {
             return Err(TransportError::Http { status });
         }
         let body = &response[separator + 4..];
+        // A body shorter than its declared `Content-Length` means the response was truncated;
+        // parsing it anyway could turn a failed accept into an apparent success (or vice versa).
+        let body = match content_length(&head) {
+            Some(expected) if body.len() < expected => {
+                return Err(TransportError::Protocol(
+                    "truncated HTTP response body".into(),
+                ));
+            }
+            Some(expected) => &body[..expected],
+            None => body,
+        };
         if body.is_empty() {
             return Ok(serde_json::Value::Null);
         }
@@ -310,7 +324,7 @@ impl LcuEventSocket {
             "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\nAuthorization: {}\r\n\r\n",
             self.credentials.port,
             key,
-            authorization(&self.credentials),
+            self.credentials.authorization(),
         );
         tls.write_all(handshake.as_bytes())
             .await
@@ -350,6 +364,8 @@ impl LcuEventSocket {
             tls,
             decoder: WebSocketFrameDecoder::new(MAX_EVENT_BYTES),
             leftover: remainder,
+            queue: SocketQueue::default(),
+            ping_outstanding: false,
         };
         connection
             .send_frame(0x1, EVENT_SUBSCRIPTION_FRAME.as_bytes())
@@ -405,11 +421,53 @@ pub enum SocketEvent {
     Closed,
 }
 
+/// Decoded frames from one read, delivered one at a time.
+///
+/// A single TLS read can carry several events; returning only the first would silently drop the
+/// rest, including a ready check, so the remainder is queued instead.
+#[derive(Default)]
+struct SocketQueue {
+    queued: VecDeque<SocketEvent>,
+    closed: bool,
+}
+
+impl SocketQueue {
+    /// Converts decoded frames into deliverable events and returns the ping payloads that must
+    /// be answered with a pong. Frames after a close are discarded.
+    fn push(&mut self, frames: Vec<DecodedFrame>) -> Vec<Vec<u8>> {
+        let mut pongs = Vec::new();
+        for frame in frames {
+            if self.closed {
+                break;
+            }
+            match frame {
+                DecodedFrame::Text(text) => self.queued.push_back(SocketEvent::Text(text)),
+                DecodedFrame::Close(_) => {
+                    self.closed = true;
+                    self.queued.push_back(SocketEvent::Closed);
+                }
+                DecodedFrame::Ping(payload) => pongs.push(payload),
+            }
+        }
+        pongs
+    }
+
+    fn pop(&mut self) -> Option<SocketEvent> {
+        self.queued.pop_front()
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed
+    }
+}
+
 /// A connected LCU event socket.
 pub struct LcuEventConnection {
     tls: tokio_rustls::client::TlsStream<TcpStream>,
     decoder: WebSocketFrameDecoder,
     leftover: Vec<u8>,
+    queue: SocketQueue,
+    ping_outstanding: bool,
 }
 
 impl LcuEventConnection {
@@ -427,22 +485,44 @@ impl LcuEventConnection {
             .map_err(|error| TransportError::Io(error.to_string()))
     }
 
-    /// Returns the next text event, or `Closed` when the connection ends. Ping frames are
-    /// answered with a pong and do not surface.
+    /// Returns the next text event, or `Closed` when the connection ends.
+    ///
+    /// Frames decoded from one read are queued and returned one per call. Ping frames are
+    /// answered with a pong and do not surface. When the socket stays silent for
+    /// `EVENT_IDLE_PING` a keepalive ping is sent; if it stays silent for `EVENT_PONG_TIMEOUT`
+    /// afterwards the connection is treated as dead so the service can reconnect.
     pub async fn next_event(&mut self) -> Result<SocketEvent, TransportError> {
         loop {
+            if let Some(event) = self.queue.pop() {
+                return Ok(event);
+            }
+            if self.queue.is_closed() {
+                return Ok(SocketEvent::Closed);
+            }
+
             let chunk = if self.leftover.is_empty() {
                 let mut buffer = [0u8; 8192];
-                let read = self
-                    .tls
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|error| TransportError::Io(error.to_string()))?;
-                if read == 0 {
-                    return Ok(SocketEvent::Closed);
+                let wait = if self.ping_outstanding {
+                    EVENT_PONG_TIMEOUT
+                } else {
+                    EVENT_IDLE_PING
+                };
+                match tokio::time::timeout(wait, self.tls.read(&mut buffer)).await {
+                    Ok(Ok(0)) => return Ok(SocketEvent::Closed),
+                    Ok(Ok(read)) => {
+                        self.ping_outstanding = false;
+                        buffer[..read].to_vec()
+                    }
+                    Ok(Err(error)) => return Err(TransportError::Io(error.to_string())),
+                    Err(_) if self.ping_outstanding => return Err(TransportError::Timeout),
+                    Err(_) => {
+                        self.send_frame(0x9, &[]).await?;
+                        self.ping_outstanding = true;
+                        continue;
+                    }
                 }
-                buffer[..read].to_vec()
             } else {
+                self.ping_outstanding = false;
                 std::mem::take(&mut self.leftover)
             };
 
@@ -450,12 +530,9 @@ impl LcuEventConnection {
                 .decoder
                 .push(&chunk)
                 .map_err(|error| TransportError::Protocol(error.to_string()))?;
-            for frame in frames {
-                match frame {
-                    DecodedFrame::Text(text) => return Ok(SocketEvent::Text(text)),
-                    DecodedFrame::Close(_) => return Ok(SocketEvent::Closed),
-                    DecodedFrame::Ping(payload) => self.send_frame(0xA, &payload).await?,
-                }
+            let pongs = self.queue.push(frames);
+            for payload in pongs {
+                self.send_frame(0xA, &payload).await?;
             }
         }
     }
@@ -465,9 +542,163 @@ fn find_double_crlf(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
+/// Parses the `Content-Length` header, which LCU responses always carry.
+fn content_length(header: &str) -> Option<usize> {
+    header.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    })
+}
+
 fn parse_status(header: &str) -> Option<u16> {
     let line = header.lines().next()?;
     let mut parts = line.split_whitespace();
     parts.next()?; // HTTP/1.1
     parts.next()?.parse::<u16>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+
+    fn accept_for(key: &str) -> String {
+        let mut hasher = Sha1::new();
+        hasher.update(key.as_bytes());
+        hasher.update(WEBSOCKET_GUID.as_bytes());
+        base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
+    }
+
+    fn handshake_header(key: &str) -> String {
+        format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n",
+            accept_for(key)
+        )
+    }
+
+    #[test]
+    fn accepts_a_valid_handshake() {
+        assert!(validate_handshake(&handshake_header(KEY), KEY).is_ok());
+    }
+
+    #[test]
+    fn accepts_header_name_case_and_connection_token_lists() {
+        let header = format!(
+            "HTTP/1.0 101 Switching Protocols\r\nUPGRADE: WebSocket\r\nconnection: keep-alive, Upgrade\r\nsec-websocket-accept: {}\r\n",
+            accept_for(KEY)
+        );
+        assert!(validate_handshake(&header, KEY).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_status_line_that_is_not_101() {
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n",
+            accept_for(KEY)
+        );
+        match validate_handshake(&header, KEY) {
+            Err(TransportError::Handshake(message)) => {
+                assert!(message.contains("status line"), "unexpected: {message}");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_upgrade_headers_that_are_missing_or_wrong() {
+        let missing = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {}\r\n",
+            accept_for(KEY)
+        );
+        assert!(matches!(
+            validate_handshake(&missing, KEY),
+            Err(TransportError::Handshake(_))
+        ));
+
+        let header = handshake_header(KEY).replace("Upgrade: websocket", "Upgrade: h2c");
+        assert!(matches!(
+            validate_handshake(&header, KEY),
+            Err(TransportError::Handshake(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_a_mismatched_accept_value() {
+        match validate_handshake(&handshake_header("some-other-key"), KEY) {
+            Err(TransportError::Handshake(message)) => {
+                assert!(message.contains("mismatch"), "unexpected: {message}");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_the_status_line() {
+        assert_eq!(parse_status("HTTP/1.1 204 No Content"), Some(204));
+        assert_eq!(parse_status("HTTP/1.1 404 Not Found"), Some(404));
+        assert_eq!(parse_status("garbage"), None);
+        assert_eq!(parse_status(""), None);
+    }
+
+    #[test]
+    fn parses_content_length_case_insensitively() {
+        assert_eq!(
+            content_length("HTTP/1.1 200 OK\r\nContent-Length: 42\r\n"),
+            Some(42)
+        );
+        assert_eq!(
+            content_length("HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n"),
+            Some(0)
+        );
+        assert_eq!(content_length("HTTP/1.1 200 OK\r\nConnection: close"), None);
+        assert_eq!(
+            content_length("HTTP/1.1 200 OK\r\nContent-Length: not-a-number\r\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn queues_every_frame_decoded_from_one_read() {
+        let mut queue = SocketQueue::default();
+        let pongs = queue.push(vec![
+            DecodedFrame::Text("first".into()),
+            DecodedFrame::Text("second".into()),
+            DecodedFrame::Text("third".into()),
+        ]);
+        assert!(pongs.is_empty());
+        assert_eq!(queue.pop(), Some(SocketEvent::Text("first".into())));
+        assert_eq!(queue.pop(), Some(SocketEvent::Text("second".into())));
+        assert_eq!(queue.pop(), Some(SocketEvent::Text("third".into())));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn answers_pings_without_surfacing_them() {
+        let mut queue = SocketQueue::default();
+        let pongs = queue.push(vec![
+            DecodedFrame::Ping(b"keepalive".to_vec()),
+            DecodedFrame::Text("event".into()),
+        ]);
+        assert_eq!(pongs, vec![b"keepalive".to_vec()]);
+        assert_eq!(queue.pop(), Some(SocketEvent::Text("event".into())));
+    }
+
+    #[test]
+    fn a_close_ends_the_stream_and_discards_later_frames() {
+        let mut queue = SocketQueue::default();
+        queue.push(vec![
+            DecodedFrame::Text("before".into()),
+            DecodedFrame::Close(vec![]),
+            DecodedFrame::Text("after".into()),
+        ]);
+        assert_eq!(queue.pop(), Some(SocketEvent::Text("before".into())));
+        assert_eq!(queue.pop(), Some(SocketEvent::Closed));
+        assert_eq!(queue.pop(), None);
+        assert!(queue.is_closed());
+    }
 }

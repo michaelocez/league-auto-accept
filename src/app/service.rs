@@ -12,8 +12,8 @@ use crate::app::events::AppEvent;
 use crate::config::settings::AppSettings;
 use crate::league::discovery::ClientLocator;
 use crate::league::service::{LeagueService, ServiceEvent};
-use crate::notifications::discord::DiscordWebhookClient;
-use crate::notifications::service::NotificationService;
+use crate::notifications::discord::{DiscordWebhookClient, WebhookSecret};
+use crate::notifications::service::{NotificationService, NotificationSettings};
 
 /// Commands the UI sends to the notification backend.
 #[derive(Clone, Copy, Debug)]
@@ -28,9 +28,13 @@ pub struct BackgroundService {
 }
 
 /// Starts the League service + notifications and bridges their events to `tx`.
+///
+/// `webhook` is the shared webhook secret. It is handed only to the notification sender; the UI
+/// holds the settings store, not this handle, and sees just its non-secret status.
 pub fn spawn_league_service(
     tx: async_channel::Sender<AppEvent>,
     settings: Arc<RwLock<AppSettings>>,
+    webhook: Arc<RwLock<WebhookSecret>>,
     auto_accept_enabled: bool,
 ) -> BackgroundService {
     let enabled_flag = Arc::new(AtomicBool::new(auto_accept_enabled));
@@ -56,7 +60,11 @@ pub fn spawn_league_service(
 
                 let snapshot = {
                     let settings = settings.clone();
-                    Arc::new(move || settings.read().map(|guard| guard.clone()).unwrap_or_default())
+                    let webhook = webhook.clone();
+                    Arc::new(move || NotificationSettings {
+                        settings: settings.read().map(|guard| guard.clone()).unwrap_or_default(),
+                        webhook: webhook.read().map(|guard| guard.clone()).unwrap_or_default(),
+                    })
                 };
                 let notifications = Arc::new(NotificationService::new(
                     snapshot,
