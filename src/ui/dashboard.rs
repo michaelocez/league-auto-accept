@@ -341,7 +341,8 @@ impl Dashboard {
             b: 0.0,
             a: 0.0,
         };
-        let last = self.state.activity.len() - 1;
+        // `last` only tags the final row, so an empty list must render nothing rather than underflow.
+        let last = self.state.activity.len().saturating_sub(1);
         let items: Vec<gpui::AnyElement> = self
             .state
             .activity
