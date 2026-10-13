@@ -23,7 +23,9 @@ use crate::config::settings::{
     is_valid_discord_id, AppSettings, BackdropMode, DiscordMention, ThemeMode, MAX_DISCORD_USER_IDS,
 };
 use crate::config::store::{save_error_message, SettingsStore};
-use crate::notifications::discord::parse_discord_webhook_url;
+use crate::notifications::discord::{
+    content_error, parse_discord_webhook_url, preview_notification,
+};
 use crate::platform::glass;
 use crate::platform::tray::TrayCommand;
 use crate::platform::window as platform_window;
@@ -37,7 +39,17 @@ use crate::ui::theme::{self, Appearance, SurfaceTreatment, Theme};
 #[derive(Clone, Copy)]
 enum ToggleSetting {
     DiscordNotifications,
+    QueuePopped,
+    AutoAccepted,
+    GameStarted,
     MinimizeToTray,
+}
+
+/// The three editable notification message templates, newest state in their input entities.
+struct MessageTemplates {
+    queue_popped: Entity<InputState>,
+    auto_accepted: Entity<InputState>,
+    game_started: Entity<InputState>,
 }
 
 pub struct Dashboard {
@@ -51,6 +63,7 @@ pub struct Dashboard {
     mention_nickname: Entity<InputState>,
     mention_id: Entity<InputState>,
     mention_error: Option<String>,
+    templates: MessageTemplates,
     #[allow(dead_code)]
     subscriptions: Vec<Subscription>,
     screen: Screen,
@@ -69,14 +82,16 @@ impl Dashboard {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let webhook_draft = settings.discord_webhook_url.clone();
+        // The saved secret is never read into the view: the field starts empty, and only a newly
+        // typed URL (or a removal) can change what is stored, through the store's typed setter.
+        let webhook_draft = String::new();
+        let webhook_status = store.borrow().webhook_status();
         let subscription = cx.subscribe_in(
             &webhook,
             window,
             |this, state, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.webhook_draft = state.read(cx).value().to_string();
-                    this.persist(json!({ "discordWebhookUrl": this.webhook_draft.clone() }));
                     cx.notify();
                 }
             },
@@ -84,8 +99,34 @@ impl Dashboard {
         let mention_nickname =
             cx.new(|cx| InputState::new(window, cx).placeholder("Nickname (optional)"));
         let mention_id = cx.new(|cx| InputState::new(window, cx).placeholder("Discord user ID"));
+
+        let queue_popped = Self::template_input(
+            &settings.notification_messages.queue_popped,
+            "Sent when your queue pops",
+            window,
+            cx,
+        );
+        let auto_accepted = Self::template_input(
+            &settings.notification_messages.auto_accepted,
+            "Sent when a ready check is accepted",
+            window,
+            cx,
+        );
+        let game_started = Self::template_input(
+            &settings.notification_messages.game_started,
+            "Sent when the game begins",
+            window,
+            cx,
+        );
+        let subscriptions = vec![
+            subscription,
+            Self::template_subscription(&queue_popped, "queuePopped", window, cx),
+            Self::template_subscription(&auto_accepted, "autoAccepted", window, cx),
+            Self::template_subscription(&game_started, "gameStarted", window, cx),
+        ];
+
         Self {
-            state: AppState::new(settings),
+            state: AppState::new(settings, webhook_status),
             store,
             enabled_flag,
             settings_shared,
@@ -95,10 +136,50 @@ impl Dashboard {
             mention_nickname,
             mention_id,
             mention_error: None,
-            subscriptions: vec![subscription],
+            templates: MessageTemplates {
+                queue_popped,
+                auto_accepted,
+                game_started,
+            },
+            subscriptions,
             screen: Screen::AutoAccept,
             focus_handle: cx.focus_handle(),
         }
+    }
+
+    /// An input pre-filled with a saved message template.
+    fn template_input(
+        value: &str,
+        placeholder: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        let value = value.to_string();
+        cx.new(move |cx| {
+            let mut state = InputState::new(window, cx).placeholder(placeholder);
+            state.set_value(value, window, cx);
+            state
+        })
+    }
+
+    /// Persists a template edit as the user types. `{mentions}` is substituted at send time.
+    fn template_subscription(
+        input: &Entity<InputState>,
+        key: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe_in(
+            input,
+            window,
+            move |this, state, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = state.read(cx).value().to_string();
+                    this.persist(json!({ "notificationMessages": { key: value } }));
+                    cx.notify();
+                }
+            },
+        )
     }
 
     pub fn state(&self) -> &AppState {
@@ -159,6 +240,39 @@ impl Dashboard {
         self.persist(json!({ "autoAcceptEnabled": enabled }));
     }
 
+    /// Stores the typed webhook through the store's validating setter. The view never reads the
+    /// stored value back — only the non-secret status changes.
+    fn save_webhook(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let outcome = self.store.borrow_mut().set_webhook(&self.webhook_draft);
+        match outcome {
+            Ok(()) => {
+                self.state.webhook_status = self.store.borrow().webhook_status();
+                self.state.webhook_test = None;
+                self.webhook_draft.clear();
+                let input = self.webhook.clone();
+                input.update(cx, |state, cx| {
+                    state.set_value(String::new(), window, cx);
+                });
+            }
+            Err(error) => {
+                log::error!("failed to save the Discord webhook: {error}");
+            }
+        }
+        cx.notify();
+    }
+
+    /// Removes the stored webhook. The view cannot do this through a settings patch.
+    fn clear_webhook(&mut self, cx: &mut Context<Self>) {
+        match self.store.borrow_mut().clear_webhook() {
+            Ok(()) => {
+                self.state.webhook_status = self.store.borrow().webhook_status();
+                self.state.webhook_test = None;
+            }
+            Err(error) => log::error!("failed to clear the Discord webhook: {error}"),
+        }
+        cx.notify();
+    }
+
     /// Applies a translucent backdrop treatment, falling back to opaque when the OS has no DWM
     /// backdrop (so the window is never left transparent and unreadable).
     fn set_treatment(
@@ -215,6 +329,18 @@ impl Dashboard {
                     ToggleSetting::DiscordNotifications => {
                         let next = !this.state.settings.discord_notifications_enabled;
                         this.persist(json!({ "discordNotificationsEnabled": next }));
+                    }
+                    ToggleSetting::QueuePopped => {
+                        let next = !this.state.settings.notification_events.queue_popped;
+                        this.persist(json!({ "notificationEvents": { "queuePopped": next } }));
+                    }
+                    ToggleSetting::AutoAccepted => {
+                        let next = !this.state.settings.notification_events.auto_accepted;
+                        this.persist(json!({ "notificationEvents": { "autoAccepted": next } }));
+                    }
+                    ToggleSetting::GameStarted => {
+                        let next = !this.state.settings.notification_events.game_started;
+                        this.persist(json!({ "notificationEvents": { "gameStarted": next } }));
                     }
                     ToggleSetting::MinimizeToTray => {
                         let next = !this.state.settings.minimize_to_tray;
@@ -390,13 +516,16 @@ impl Dashboard {
         let t = Theme::of(cx);
         let discord_enabled = self.state.settings.discord_notifications_enabled;
         let testing = self.state.webhook_testing;
-        let webhook_error = if self.webhook_draft.trim().is_empty() {
+        let draft = self.webhook_draft.trim().to_string();
+        let webhook_error = if draft.is_empty() {
             String::new()
-        } else if parse_discord_webhook_url(&self.webhook_draft).is_none() {
+        } else if parse_discord_webhook_url(&draft).is_none() {
             "Enter a valid Discord webhook URL.".to_string()
         } else {
             String::new()
         };
+        let can_save = !draft.is_empty() && webhook_error.is_empty();
+        let webhook_configured = self.state.webhook_status.configured;
         let (test_message, test_color) = if testing {
             ("Sending test webhook…".to_string(), t.text_muted)
         } else {
@@ -411,8 +540,49 @@ impl Dashboard {
         };
 
         let mut webhook_row = Row::new("Webhook URL")
-            .description("Stored in the privileged backend; never shown to other apps.")
-            .child(div().max_w(px(440.0)).child(Input::new(&self.webhook)));
+            .description("Encrypted at rest and read only by the notification service; this window shows whether one is saved, never the URL itself.")
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme::space_2())
+                    .max_w(px(440.0))
+                    .child(Input::new(&self.webhook))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme::space_3())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_size(theme::text_caption())
+                                    .text_color(t.text_muted)
+                                    .child(self.state.webhook_status.label()),
+                            )
+                            .child(
+                                Button::new("save-webhook", "Save")
+                                    .variant(ButtonVariant::Secondary)
+                                    .disabled(!can_save)
+                                    .on_click(cx.listener(
+                                        |this, _event: &ClickEvent, window, cx| {
+                                            this.save_webhook(window, cx);
+                                        },
+                                    )),
+                            )
+                            .child(
+                                Button::new("clear-webhook", "Remove")
+                                    .variant(ButtonVariant::Ghost)
+                                    .disabled(!webhook_configured)
+                                    .on_click(cx.listener(
+                                        |this, _event: &ClickEvent, _window, cx| {
+                                            this.clear_webhook(cx);
+                                        },
+                                    )),
+                            ),
+                    ),
+            );
         if !webhook_error.is_empty() {
             webhook_row = webhook_row.child(
                 div()
@@ -460,7 +630,8 @@ impl Dashboard {
                     .child(test_message),
             );
 
-        SettingsGroup::new()
+        let events = self.state.settings.notification_events.clone();
+        let delivery = SettingsGroup::new()
             .child(Self::toggle_row(
                 "toggle-discord",
                 "Enable Discord notifications",
@@ -471,8 +642,103 @@ impl Dashboard {
             ))
             .child(webhook_row)
             .child(self.render_mentions(&t, cx))
-            .child(test_row)
+            .child(test_row);
+
+        let event_group = SettingsGroup::new()
+            .title("Events")
+            .child(Self::toggle_row(
+                "toggle-queue-popped",
+                "Queue popped",
+                "Sent when your queue pops.",
+                events.queue_popped,
+                ToggleSetting::QueuePopped,
+                cx,
+            ))
+            .child(Self::toggle_row(
+                "toggle-auto-accepted",
+                "Ready check accepted",
+                "Sent when a ready check is accepted automatically.",
+                events.auto_accepted,
+                ToggleSetting::AutoAccepted,
+                cx,
+            ))
+            .child(Self::toggle_row(
+                "toggle-game-started",
+                "Game started",
+                "Sent when the game begins.",
+                events.game_started,
+                ToggleSetting::GameStarted,
+                cx,
+            ));
+
+        let mentions = self.state.settings.discord_mentions.clone();
+        let message_group = SettingsGroup::new()
+            .title("Messages")
+            .child(self.message_row("Queue popped", &self.templates.queue_popped, &mentions, cx))
+            .child(self.message_row(
+                "Ready check accepted",
+                &self.templates.auto_accepted,
+                &mentions,
+                cx,
+            ))
+            .child(self.message_row("Game started", &self.templates.game_started, &mentions, cx));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme::space_6())
+            .child(delivery)
+            .child(event_group)
+            .child(message_group)
             .into_any_element()
+    }
+
+    /// A message template with a live preview of exactly what would be sent for it, rendered
+    /// locally with the saved mentions (no network).
+    fn message_row(
+        &self,
+        label: &'static str,
+        template: &Entity<InputState>,
+        mentions: &[DiscordMention],
+        cx: &mut Context<Self>,
+    ) -> Row {
+        let t = Theme::of(cx);
+        let text = template.read(cx).value().to_string();
+        let rendered = preview_notification(&text, mentions);
+        let error = content_error(&rendered);
+        let preview = if rendered.is_empty() {
+            "…".to_string()
+        } else {
+            rendered
+        };
+
+        Row::new(label)
+            .description("Use {mentions} where the mentioned people should appear.")
+            .child(div().max_w(px(440.0)).child(Input::new(template)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme::space_1())
+                    .child(
+                        div()
+                            .px(theme::space_3())
+                            .py(theme::space_2())
+                            .bg(t.surface_hover)
+                            .rounded(theme::radius_md())
+                            .text_size(theme::text_small())
+                            .text_color(t.text_muted)
+                            .child(preview),
+                    )
+                    .when_some(error, |this, message| {
+                        this.child(
+                            div()
+                                .text_size(theme::text_caption())
+                                .text_color(t.danger)
+                                .child(message),
+                        )
+                    }),
+            )
     }
 
     fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {

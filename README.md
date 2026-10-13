@@ -45,8 +45,11 @@ creates is its own per-user settings file (see [Configuration](#configuration)).
   the League Client is connected; the UI shows `Active`, `Connecting`, `League offline`, or
   `Disabled` so you always know the real state.
 - **Notifications**: open the Notifications page, enable Discord notifications, paste a Discord
-  webhook URL, optionally add people to mention (nickname + Discord user ID), and use **Test
-  Webhook** to verify.
+  webhook URL and press **Save** (the field starts empty and the saved URL is never shown back),
+  optionally add people to mention (nickname + Discord user ID), and use **Test Webhook** to
+  verify. Each lifecycle event — queue popped, ready check accepted, game started — has its own
+  switch and its own editable message, with a live preview of exactly what will be sent (use
+  `{mentions}` where the mentioned people should appear; up to 5 are ever mentioned).
 - **Appearance**: on the Settings page choose **Dark** or **Light**, and a window backdrop —
   **Opaque** (default), **Mica**, or **Acrylic**. Your choices are saved and restored on next
   launch.
@@ -59,9 +62,11 @@ Settings are stored as JSON at:
 %APPDATA%\League Auto Accept\settings.json
 ```
 
-The only secret is the Discord webhook URL; it is encrypted with the OS codec where available and
-is never logged or exposed to the UI layer. Your theme and window backdrop are stored here too, so
-they are restored on next launch.
+The only secret is the Discord webhook URL. It is encrypted with the OS codec (DPAPI on Windows)
+where available, written only through the settings store's typed, validating setter, and read only
+by the notification sender. It is never part of application state, the tray or the rendered UI: the
+window shows only whether a webhook is configured and its host. Your theme and window backdrop are
+stored here too, so they are restored on next launch.
 
 The app must be able to write that file. If the write is refused — the directory is read-only, or the
 app was started from a sandboxed/low-integrity context — the change still takes effect for the
@@ -101,8 +106,10 @@ application icon embedded into the executable.
 cargo test
 ```
 
-The test suite runs without a live League client; the LCU transport is verified against a
-self-signed mock server.
+The test suite runs without a live League client. The LCU transport is exercised end to end against
+self-signed mock TLS servers on loopback, including the Basic-auth header, response parsing and the
+WebSocket handshake; as with the real LCU, certificate verification is disabled for that loopback
+connection only.
 
 ## Validation
 
@@ -129,8 +136,12 @@ channel, so the client being closed or restarted never blocks or crashes the app
 
 ## Security model
 
-- LCU credentials stay in the privileged backend layer; the UI cannot access them.
-- Only the fixed League Client ready-check endpoints are used.
+- LCU credentials stay in the privileged backend layer; the UI cannot access them — the password is
+  private, `Debug` output redacts it, and the change-detection signature is a digest.
+- Only the League Client endpoints the app uses are reachable: the request builder matches an
+  explicit endpoint allowlist and exposes a closed set of calls.
+- The Discord webhook URL is written through a typed, validating setter and read only by the
+  notification sender; it is absent from application state and redacted in `Debug` output.
 - Discord webhook URLs are validated; outbound requests are constrained and do not follow redirects.
 - No analytics, telemetry, updater, or remote content.
 

@@ -19,18 +19,20 @@ use tokio_tungstenite::tungstenite::http::{Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 
 use league_auto_accept::league::lockfile::LcuCredentials;
-use league_auto_accept::league::transport::{LcuEventSocket, LcuRestClient, SocketEvent};
+use league_auto_accept::league::transport::{
+    LcuEventSocket, LcuRestClient, SocketEvent, TransportError,
+};
 
 const PASSWORD: &str = "local-secret";
 
 fn credentials(port: u16) -> LcuCredentials {
-    LcuCredentials {
-        install_path: PathBuf::new(),
-        process_name: "LeagueClientUx".into(),
-        process_id: 1,
+    LcuCredentials::new(
+        PathBuf::new(),
+        "LeagueClientUx".into(),
+        1,
         port,
-        password: PASSWORD.into(),
-    }
+        PASSWORD.into(),
+    )
 }
 
 fn expected_authorization() -> String {
@@ -118,6 +120,88 @@ async fn spawn_mock_rest(port_holder: tokio::sync::oneshot::Sender<u16>) {
     }
 }
 
+/// A mock LCU HTTPS endpoint that answers every request with one status.
+async fn spawn_status_only_rest(port_holder: tokio::sync::oneshot::Sender<u16>, status: u16) {
+    let (config, _cert) = server_config();
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    port_holder
+        .send(listener.local_addr().unwrap().port())
+        .unwrap();
+
+    loop {
+        let Ok((tcp, _)) = listener.accept().await else {
+            break;
+        };
+        let acceptor = acceptor.clone();
+        tokio::spawn(async move {
+            let Ok(mut tls) = acceptor.accept(tcp).await else {
+                return;
+            };
+            let mut chunk = [0u8; 4096];
+            let _ = tls.read(&mut chunk).await;
+            let response = http_response(status, "");
+            let _ = tls.write_all(response.as_bytes()).await;
+            let _ = tls.flush().await;
+        });
+    }
+}
+
+/// Serves one TLS connection per client, answering the request head with `responder`'s bytes.
+///
+/// An empty reply makes the server hold the connection open without answering, which is how the
+/// request-timeout path is exercised.
+async fn spawn_raw_rest<F>(responder: F) -> u16
+where
+    F: Fn(&str) -> Vec<u8> + Send + Sync + 'static,
+{
+    let (config, _cert) = server_config();
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let responder = Arc::new(responder);
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                break;
+            };
+            let acceptor = acceptor.clone();
+            let responder = responder.clone();
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let Ok(read) = tls.read(&mut chunk).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&buffer).to_string();
+                let response = responder(&head);
+                if response.is_empty() {
+                    // Stall without answering so the client runs into its request timeout.
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    return;
+                }
+                let _ = tls.write_all(&response).await;
+                let _ = tls.flush().await;
+            });
+        }
+    });
+
+    port
+}
+
 #[tokio::test]
 async fn rest_transport_authenticates_parses_and_accepts() {
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
@@ -135,18 +219,109 @@ async fn rest_transport_authenticates_parses_and_accepts() {
 async fn rest_transport_reports_non_success_status() {
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(spawn_mock_rest(tx));
+    tokio::spawn(spawn_status_only_rest(tx, 404));
     let port = rx.await.unwrap();
 
     let client = LcuRestClient::new(credentials(port));
-    // The mock returns 404 for any path other than the fixed endpoints it knows.
-    let error = client.get("/lol-nonexistent/v1/thing").await.unwrap_err();
+    // The client only ever calls its fixed endpoints; the mock answers this one with 404.
+    let error = client.verify().await.unwrap_err();
     match error {
         league_auto_accept::league::transport::TransportError::Http { status } => {
             assert_eq!(status, 404);
         }
         other => panic!("unexpected error: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn rest_transport_reports_a_malformed_response_head() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let port = spawn_raw_rest(|_| b"GARBAGE\r\n\r\n".to_vec()).await;
+
+    let client = LcuRestClient::new(credentials(port));
+    match client.verify().await.unwrap_err() {
+        TransportError::Protocol(message) => {
+            assert!(message.contains("status"), "unexpected message: {message}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rest_transport_reports_invalid_json() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let port = spawn_raw_rest(|_| http_response(200, "{not json").into_bytes()).await;
+
+    let client = LcuRestClient::new(credentials(port));
+    assert!(matches!(
+        client.verify().await,
+        Err(TransportError::Json(_))
+    ));
+}
+
+#[tokio::test]
+async fn rest_transport_rejects_a_truncated_body() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let port = spawn_raw_rest(|_| {
+        // A complete, valid JSON document that is shorter than the declared Content-Length.
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}",
+            r#"{"state":"InProgress"}"#
+        )
+        .into_bytes()
+    })
+    .await;
+
+    let client = LcuRestClient::new(credentials(port));
+    match client.verify().await.unwrap_err() {
+        TransportError::Protocol(message) => {
+            assert!(
+                message.contains("truncated"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rest_transport_rejects_an_oversized_response() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    const BODY: usize = 4 * 1024 * 1024 + 8192;
+    let port = spawn_raw_rest(|_| {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {BODY}\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        response.resize(response.len() + BODY, b'x');
+        response
+    })
+    .await;
+
+    let client = LcuRestClient::new(credentials(port));
+    match client.verify().await.unwrap_err() {
+        TransportError::Protocol(message) => {
+            assert!(
+                message.contains("size limit"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rest_transport_times_out_when_the_server_never_answers() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let port = spawn_raw_rest(|_| Vec::new()).await;
+
+    let client = LcuRestClient::new(credentials(port));
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        client.verify().await,
+        Err(TransportError::Timeout)
+    ));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(4));
 }
 
 // The WebSocket handshake callback's error type is large by library design; not actionable here.
@@ -208,6 +383,98 @@ async fn event_socket_handshakes_subscribes_and_receives_an_event() {
         }
         other => panic!("unexpected socket event: {other:?}"),
     }
+
+    server.await.unwrap();
+}
+
+// The WebSocket handshake callback's error type is large by library design; not actionable here.
+#[allow(clippy::result_large_err)]
+#[tokio::test]
+async fn event_socket_delivers_every_event_from_one_read() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let (config, _cert) = server_config();
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let tls = acceptor.accept(tcp).await.unwrap();
+        let mut ws = accept_hdr_async(tls, |_: &Request<()>, response: Response<()>| Ok(response))
+            .await
+            .expect("handshake failed");
+        let _ = ws.next().await.unwrap().unwrap(); // subscription frame
+
+        let phase = r#"[8,"OnJsonApiEvent",{"uri":"/lol-gameflow/v1/gameflow-phase","eventType":"Update","data":"InProgress"}]"#;
+        let ready = r#"[8,"OnJsonApiEvent",{"uri":"/lol-matchmaking/v1/ready-check","eventType":"Update","data":{"state":"InProgress","playerResponse":"None"}}]"#;
+        // Feed both frames before flushing so they travel in a single write.
+        ws.feed(Message::Text(phase.into())).await.unwrap();
+        ws.feed(Message::Text(ready.into())).await.unwrap();
+        ws.flush().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    });
+
+    let mut connection = LcuEventSocket::new(credentials(port))
+        .connect()
+        .await
+        .expect("event socket should connect");
+
+    let mut uris = Vec::new();
+    for _ in 0..2 {
+        match connection.next_event().await.expect("event should arrive") {
+            SocketEvent::Text(text) => {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                uris.push(value[2]["uri"].as_str().unwrap().to_string());
+            }
+            other => panic!("unexpected socket event: {other:?}"),
+        }
+    }
+    assert_eq!(
+        uris,
+        vec![
+            "/lol-gameflow/v1/gameflow-phase".to_string(),
+            "/lol-matchmaking/v1/ready-check".to_string()
+        ]
+    );
+
+    server.await.unwrap();
+}
+
+// The WebSocket handshake callback's error type is large by library design; not actionable here.
+#[allow(clippy::result_large_err)]
+#[tokio::test]
+async fn event_socket_answers_pings_and_reports_close() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let (config, _cert) = server_config();
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let tls = acceptor.accept(tcp).await.unwrap();
+        let mut ws = accept_hdr_async(tls, |_: &Request<()>, response: Response<()>| Ok(response))
+            .await
+            .expect("handshake failed");
+        let _ = ws.next().await.unwrap().unwrap(); // subscription frame
+
+        ws.send(Message::Ping(vec![1, 2, 3])).await.unwrap();
+        match ws.next().await.unwrap().unwrap() {
+            Message::Pong(payload) => assert_eq!(payload, vec![1, 2, 3]),
+            other => panic!("expected a pong, got: {other:?}"),
+        }
+        ws.send(Message::Close(None)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    });
+
+    let mut connection = LcuEventSocket::new(credentials(port))
+        .connect()
+        .await
+        .expect("event socket should connect");
+    assert_eq!(
+        connection.next_event().await.expect("close should surface"),
+        SocketEvent::Closed
+    );
 
     server.await.unwrap();
 }

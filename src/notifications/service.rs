@@ -5,13 +5,23 @@
 
 use std::sync::Arc;
 
-use crate::config::settings::AppSettings;
+use crate::config::settings::{allowed_mention_ids, AppSettings};
 use crate::league::ready_check::Lifecycle;
 
-use super::discord::{render_notification_message, DiscordSender, WebhookFuture, WebhookRequest};
+use super::discord::{
+    render_notification_message, DiscordSender, WebhookFuture, WebhookRequest, WebhookSecret,
+};
+
+/// A settings snapshot plus the webhook secret the sender needs. The secret is read here only, and
+/// is deliberately absent from [`AppSettings`] so it never reaches application state or the UI.
+#[derive(Clone, Debug, Default)]
+pub struct NotificationSettings {
+    pub settings: AppSettings,
+    pub webhook: WebhookSecret,
+}
 
 /// Reads the current settings snapshot.
-pub type SettingsSnapshot = Arc<dyn Fn() -> AppSettings + Send + Sync>;
+pub type SettingsSnapshot = Arc<dyn Fn() -> NotificationSettings + Send + Sync>;
 
 pub struct NotificationService {
     settings: SettingsSnapshot,
@@ -26,7 +36,8 @@ impl NotificationService {
     /// Returns a fire-and-forget delivery future for a lifecycle event, or `None` when the event is
     /// disabled globally or individually. The caller must spawn (not await) the future.
     pub fn notification_for(&self, event: Lifecycle) -> Option<WebhookFuture> {
-        let settings = (self.settings)();
+        let current = (self.settings)();
+        let settings = &current.settings;
         if !settings.discord_notifications_enabled {
             return None;
         }
@@ -47,27 +58,26 @@ impl NotificationService {
         if !enabled {
             return None;
         }
-        Some(self.dispatch(&settings, &template))
+        Some(self.dispatch(&current, &template))
     }
 
     /// Builds the Test Webhook request using the saved settings and configured mentions.
     pub fn test_webhook(&self) -> WebhookFuture {
-        let settings = (self.settings)();
-        let has_mentions = !settings.discord_mentions.is_empty();
+        let current = (self.settings)();
+        let has_mentions = !current.settings.discord_mentions.is_empty();
         let prefix = if has_mentions { "{mentions} " } else { "" };
         let template = format!("{prefix}League Auto Accept webhook test.");
-        self.dispatch(&settings, &template)
+        self.dispatch(&current, &template)
     }
 
-    fn dispatch(&self, settings: &AppSettings, template: &str) -> WebhookFuture {
-        let user_ids: Vec<String> = settings
-            .discord_mentions
-            .iter()
-            .map(|mention| mention.id.clone())
-            .collect();
+    fn dispatch(&self, current: &NotificationSettings, template: &str) -> WebhookFuture {
+        // Re-apply the mention allowlist and cap at send time: settings are normalised when they
+        // are written, but the delivered message must never exceed the cap regardless of how the
+        // snapshot was produced.
+        let user_ids = allowed_mention_ids(&current.settings.discord_mentions);
         let content = render_notification_message(template, &user_ids);
         self.sender.send(WebhookRequest {
-            url: settings.discord_webhook_url.clone(),
+            url: current.webhook.clone(),
             content,
             user_ids,
         })
@@ -77,7 +87,8 @@ impl NotificationService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::notifications::discord::{WebhookResult, MAX_CONTENT_LENGTH};
+    use crate::config::settings::{DiscordMention, MAX_DISCORD_USER_IDS};
+    use crate::notifications::discord::WebhookResult;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -100,28 +111,30 @@ mod tests {
         }
     }
 
-    fn settings() -> AppSettings {
-        AppSettings {
-            discord_notifications_enabled: true,
-            discord_webhook_url: format!(
+    fn settings() -> NotificationSettings {
+        NotificationSettings {
+            settings: AppSettings {
+                discord_notifications_enabled: true,
+                discord_mentions: vec![crate::config::settings::DiscordMention {
+                    id: "12345678901234567".into(),
+                    nickname: "Michael".into(),
+                }],
+                notification_events: crate::config::settings::NotificationEvents {
+                    queue_popped: true,
+                    auto_accepted: true,
+                    game_started: true,
+                },
+                ..AppSettings::default()
+            },
+            webhook: WebhookSecret::new(format!(
                 "https://discord.com/api/webhooks/{}/{}",
                 "1".repeat(17),
                 "t".repeat(40)
-            ),
-            discord_mentions: vec![crate::config::settings::DiscordMention {
-                id: "12345678901234567".into(),
-                nickname: "Michael".into(),
-            }],
-            notification_events: crate::config::settings::NotificationEvents {
-                queue_popped: true,
-                auto_accepted: true,
-                game_started: true,
-            },
-            ..AppSettings::default()
+            )),
         }
     }
 
-    fn service(current: AppSettings, sender: Arc<FakeSender>) -> NotificationService {
+    fn service(current: NotificationSettings, sender: Arc<FakeSender>) -> NotificationService {
         let snapshot = Arc::new(move || current.clone());
         NotificationService::new(snapshot, sender)
     }
@@ -129,7 +142,8 @@ mod tests {
     #[tokio::test]
     async fn sends_enabled_events_with_template_and_allowlist() {
         let mut current = settings();
-        current.notification_messages.queue_popped = "{mentions} custom queue message".into();
+        current.settings.notification_messages.queue_popped =
+            "{mentions} custom queue message".into();
         let sender = Arc::new(FakeSender::default());
         let service = service(current, sender.clone());
 
@@ -151,14 +165,14 @@ mod tests {
     #[tokio::test]
     async fn skips_globally_and_individually_disabled_events() {
         let mut global_off = settings();
-        global_off.discord_notifications_enabled = false;
+        global_off.settings.discord_notifications_enabled = false;
         let sender = Arc::new(FakeSender::default());
         assert!(service(global_off, sender.clone())
             .notification_for(Lifecycle::QueuePopped)
             .is_none());
 
         let mut event_off = settings();
-        event_off.notification_events.queue_popped = false;
+        event_off.settings.notification_events.queue_popped = false;
         assert!(service(event_off, sender.clone())
             .notification_for(Lifecycle::QueuePopped)
             .is_none());
@@ -179,6 +193,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_webhook_secret_reaches_the_sender_but_not_debug_output() {
+        let sender = Arc::new(FakeSender::default());
+        let current = settings();
+        let rendered = format!("{current:?}");
+        assert!(!rendered.contains("discord.com"), "{rendered}");
+
+        let service = service(current, sender.clone());
+        assert!(service.test_webhook().await.ok);
+        let requests = sender.requests.lock().unwrap();
+        assert!(requests[0].url.is_configured());
+    }
+
+    #[tokio::test]
+    async fn caps_mentions_at_send_time_even_for_an_unnormalised_snapshot() {
+        let mut current = settings();
+        let mut mentions: Vec<DiscordMention> = (0..7)
+            .map(|index| DiscordMention {
+                id: format!("{:017}", index + 1),
+                nickname: String::new(),
+            })
+            .collect();
+        mentions.push(DiscordMention {
+            id: "12345678901234567".into(), // duplicate of the first entry
+            nickname: String::new(),
+        });
+        mentions.push(DiscordMention {
+            id: "not-an-id".into(),
+            nickname: String::new(),
+        });
+        current.settings.discord_mentions = mentions;
+        current.settings.notification_messages.queue_popped = "{mentions}".into();
+
+        let sender = Arc::new(FakeSender::default());
+        let service = service(current, sender.clone());
+        assert!(service.notification_for(Lifecycle::QueuePopped).is_some());
+
+        let requests = sender.requests.lock().unwrap();
+        assert_eq!(requests[0].user_ids.len(), MAX_DISCORD_USER_IDS);
+        assert_eq!(requests[0].user_ids[0], "00000000000000001");
+        assert_eq!(
+            requests[0].content,
+            "<@00000000000000001> <@00000000000000002> <@00000000000000003> <@00000000000000004> <@00000000000000005>"
+        );
+        assert!(!requests[0].content.contains("not-an-id"));
+    }
+
+    #[tokio::test]
     async fn delivery_failure_is_returned_not_panicked() {
         let sender = Arc::new(FakeSender {
             requests: Mutex::new(Vec::new()),
@@ -190,6 +251,6 @@ mod tests {
             .expect("enabled");
         let result = future.await;
         assert!(!result.ok);
-        assert!(result.message.chars().count() <= MAX_CONTENT_LENGTH + 64);
+        assert_eq!(result.message, "Discord webhook request failed.");
     }
 }

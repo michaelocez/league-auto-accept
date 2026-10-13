@@ -8,7 +8,6 @@ use serde_json::Value;
 
 pub const MAX_DISCORD_USER_IDS: usize = 5;
 pub const MAX_DISCORD_NICKNAME_LENGTH: usize = 40;
-pub const MAX_WEBHOOK_URL_LENGTH: usize = 2048;
 pub const MAX_NOTIFICATION_MESSAGE_LENGTH: usize = 1800;
 
 /// Current settings schema version.
@@ -56,14 +55,15 @@ pub struct NotificationMessages {
 }
 
 /// The complete, typed application settings (schema v3).
+///
+/// The Discord webhook — the only secret — is deliberately absent: it is owned by the settings
+/// store and the notification sender, never by application state, the tray or the UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub schema_version: u32,
     pub auto_accept_enabled: bool,
     pub discord_notifications_enabled: bool,
-    /// The only secret. Persisted separately, encrypted where the OS supports it.
-    pub discord_webhook_url: String,
     pub discord_mentions: Vec<DiscordMention>,
     pub notification_events: NotificationEvents,
     pub notification_messages: NotificationMessages,
@@ -78,7 +78,6 @@ impl Default for AppSettings {
             schema_version: SCHEMA_VERSION,
             auto_accept_enabled: false,
             discord_notifications_enabled: false,
-            discord_webhook_url: String::new(),
             discord_mentions: Vec::new(),
             notification_events: NotificationEvents {
                 queue_popped: false,
@@ -116,14 +115,6 @@ pub fn normalize_settings(value: &Value, fallback: &AppSettings) -> AppSettings 
             "discordNotificationsEnabled",
             fallback.discord_notifications_enabled,
         ),
-        discord_webhook_url: string(
-            source,
-            "discordWebhookUrl",
-            &fallback.discord_webhook_url,
-            MAX_WEBHOOK_URL_LENGTH,
-        )
-        .trim()
-        .to_string(),
         discord_mentions: normalize_mentions(source, fallback),
         notification_events: NotificationEvents {
             queue_popped: boolean(
@@ -253,6 +244,26 @@ fn push_mention(output: &mut Vec<DiscordMention>, id: &str, nickname: &str) {
         id: id.to_string(),
         nickname,
     });
+}
+
+/// The mention ids a notification may actually use: trimmed, valid, de-duplicated and capped at
+/// [`MAX_DISCORD_USER_IDS`].
+///
+/// Normalisation applies these rules when settings are written; the notification sender applies
+/// them again so a notification can never mention more people than the cap.
+pub fn allowed_mention_ids(mentions: &[DiscordMention]) -> Vec<String> {
+    let mut output: Vec<String> = Vec::new();
+    for mention in mentions {
+        if output.len() >= MAX_DISCORD_USER_IDS {
+            break;
+        }
+        let id = mention.id.trim();
+        if !is_valid_discord_id(id) || output.iter().any(|existing| existing == id) {
+            continue;
+        }
+        output.push(id.to_string());
+    }
+    output
 }
 
 /// A Discord user ID is 17–20 ASCII digits.
@@ -401,6 +412,42 @@ mod tests {
         assert!(is_valid_discord_id("12345678901234567890"));
         assert!(!is_valid_discord_id("1234"));
         assert!(!is_valid_discord_id("1234567890123456a"));
+    }
+
+    #[test]
+    fn allowlisted_mention_ids_are_valid_unique_and_capped() {
+        let mentions: Vec<DiscordMention> = (0..8)
+            .map(|index| DiscordMention {
+                id: format!("{:017}", index + 1),
+                nickname: format!("Player {}", index + 1),
+            })
+            .collect();
+        let ids = allowed_mention_ids(&mentions);
+        assert_eq!(ids.len(), MAX_DISCORD_USER_IDS);
+        assert_eq!(ids[0], "00000000000000001");
+
+        let with_junk = vec![
+            DiscordMention {
+                id: format!(" {} ", "1".repeat(17)),
+                nickname: String::new(),
+            },
+            DiscordMention {
+                id: "1".repeat(17),
+                nickname: String::new(),
+            }, // duplicate after trimming
+            DiscordMention {
+                id: "not-an-id".into(),
+                nickname: String::new(),
+            },
+            DiscordMention {
+                id: "2".repeat(20),
+                nickname: String::new(),
+            },
+        ];
+        assert_eq!(
+            allowed_mention_ids(&with_junk),
+            vec!["1".repeat(17), "2".repeat(20)]
+        );
     }
 
     #[test]

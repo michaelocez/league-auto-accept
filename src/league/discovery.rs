@@ -217,7 +217,12 @@ mod tests {
             .find_running_client()
             .expect("should discover the running client");
         assert_eq!(credentials.port, 54321);
-        assert_eq!(credentials.password, "local-secret");
+        assert_eq!(credentials.process_name, "LeagueClientUx");
+        // riot:local-secret — proves the password was parsed without reading the private field.
+        assert_eq!(
+            credentials.authorization(),
+            "Basic cmlvdDpsb2NhbC1zZWNyZXQ="
+        );
         assert_eq!(credentials.install_path, install_path);
     }
 
