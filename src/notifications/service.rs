@@ -70,21 +70,11 @@ impl NotificationService {
         self.dispatch(&current, &template)
     }
 
-<<<<<<< HEAD
     fn dispatch(&self, current: &NotificationSettings, template: &str) -> WebhookFuture {
-        let user_ids: Vec<String> = current
-            .settings
-            .discord_mentions
-            .iter()
-            .map(|mention| mention.id.clone())
-            .collect();
-=======
-    fn dispatch(&self, settings: &AppSettings, template: &str) -> WebhookFuture {
         // Re-apply the mention allowlist and cap at send time: settings are normalised when they
         // are written, but the delivered message must never exceed the cap regardless of how the
         // snapshot was produced.
-        let user_ids = allowed_mention_ids(&settings.discord_mentions);
->>>>>>> origin/main
+        let user_ids = allowed_mention_ids(&current.settings.discord_mentions);
         let content = render_notification_message(template, &user_ids);
         self.sender.send(WebhookRequest {
             url: current.webhook.clone(),
@@ -203,7 +193,6 @@ mod tests {
     }
 
     #[tokio::test]
-<<<<<<< HEAD
     async fn the_webhook_secret_reaches_the_sender_but_not_debug_output() {
         let sender = Arc::new(FakeSender::default());
         let current = settings();
@@ -214,7 +203,9 @@ mod tests {
         assert!(service.test_webhook().await.ok);
         let requests = sender.requests.lock().unwrap();
         assert!(requests[0].url.is_configured());
-=======
+    }
+
+    #[tokio::test]
     async fn caps_mentions_at_send_time_even_for_an_unnormalised_snapshot() {
         let mut current = settings();
         let mut mentions: Vec<DiscordMention> = (0..7)
@@ -231,8 +222,8 @@ mod tests {
             id: "not-an-id".into(),
             nickname: String::new(),
         });
-        current.discord_mentions = mentions;
-        current.notification_messages.queue_popped = "{mentions}".into();
+        current.settings.discord_mentions = mentions;
+        current.settings.notification_messages.queue_popped = "{mentions}".into();
 
         let sender = Arc::new(FakeSender::default());
         let service = service(current, sender.clone());
@@ -246,7 +237,6 @@ mod tests {
             "<@00000000000000001> <@00000000000000002> <@00000000000000003> <@00000000000000004> <@00000000000000005>"
         );
         assert!(!requests[0].content.contains("not-an-id"));
->>>>>>> origin/main
     }
 
     #[tokio::test]

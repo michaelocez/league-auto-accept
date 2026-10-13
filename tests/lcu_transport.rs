@@ -120,7 +120,6 @@ async fn spawn_mock_rest(port_holder: tokio::sync::oneshot::Sender<u16>) {
     }
 }
 
-<<<<<<< HEAD
 /// A mock LCU HTTPS endpoint that answers every request with one status.
 async fn spawn_status_only_rest(port_holder: tokio::sync::oneshot::Sender<u16>, status: u16) {
     let (config, _cert) = server_config();
@@ -146,7 +145,8 @@ async fn spawn_status_only_rest(port_holder: tokio::sync::oneshot::Sender<u16>, 
             let _ = tls.flush().await;
         });
     }
-=======
+}
+
 /// Serves one TLS connection per client, answering the request head with `responder`'s bytes.
 ///
 /// An empty reply makes the server hold the connection open without answering, which is how the
@@ -200,7 +200,6 @@ where
     });
 
     port
->>>>>>> origin/main
 }
 
 #[tokio::test]

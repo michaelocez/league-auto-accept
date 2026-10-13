@@ -1,15 +1,10 @@
 //! Settings persistence: atomic load/save with an encrypted webhook secret.
 //!
-<<<<<<< HEAD
-//! Writes are atomic (temp file + rename), corrupt files recover to defaults, and the webhook
-//! secret is stored as `{protection, value}` separate from the plain settings. The secret is owned
-//! here (and in the shared handle the notification sender reads); it is never part of
-//! [`AppSettings`], so it cannot reach application state, the tray or the UI.
-=======
 //! Writes are atomic (temp file + rename), a malformed file is preserved as `settings.json.invalid`
 //! before defaults replace it, and the webhook secret is stored as `{protection, value}` separate
-//! from the plain settings.
->>>>>>> origin/main
+//! from the plain settings. The secret is owned here (and in the shared handle the notification
+//! sender reads); it is never part of [`AppSettings`], so it cannot reach application state, the
+//! tray or the UI.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -116,12 +111,6 @@ impl SettingsStore {
     /// antivirus scan, a permission the user will fix — is left untouched, and the caller keeps
     /// running on defaults in memory until the next successful load.
     pub fn load(&mut self) -> Result<AppSettings, StoreError> {
-<<<<<<< HEAD
-        if self.try_load().is_err() {
-            self.settings = AppSettings::default();
-            self.replace_webhook(WebhookSecret::default());
-            self.save()?;
-=======
         match self.try_load() {
             Ok(()) => Ok(self.snapshot()),
             Err(StoreError::Json(error)) => {
@@ -131,12 +120,14 @@ impl SettingsStore {
                 );
                 self.preserve_unreadable_file()?;
                 self.settings = AppSettings::default();
+                self.replace_webhook(WebhookSecret::default());
                 self.save()?;
                 Ok(self.snapshot())
             }
             // Nothing to replace means nothing to preserve: this is a first run.
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.settings = AppSettings::default();
+                self.replace_webhook(WebhookSecret::default());
                 self.save()?;
                 Ok(self.snapshot())
             }
@@ -162,12 +153,16 @@ impl SettingsStore {
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),
->>>>>>> origin/main
         }
     }
 
-    /// Applies a partial patch, persists, and returns the new settings. The webhook is not part of
-    /// [`AppSettings`], so a patch can never write it.
+    /// Applies a partial patch, persists, and returns the new settings.
+    ///
+    /// The patch is merged into the in-memory settings *before* the file is written, so when the
+    /// write is refused — a read-only or sandboxed settings directory, for example —
+    /// [`SettingsStore::snapshot`] still holds the user's intent and the caller can apply it for the
+    /// session instead of dropping it silently. The webhook is not part of [`AppSettings`], so a
+    /// patch can never write it.
     pub fn update(&mut self, patch: &Value) -> Result<AppSettings, StoreError> {
         self.settings = merge_settings(&self.settings, patch);
         self.save()?;
