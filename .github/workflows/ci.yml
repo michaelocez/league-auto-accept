@@ -26,6 +26,17 @@ jobs:
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # A squash merge once landed with the conflict markers committed, which left main unable to
+      # compile. No Rust toolchain is needed to notice, so this runs before everything else.
+      - name: Reject leftover conflict markers
+        shell: pwsh
+        run: |
+          $markers = Select-String -Path (git ls-files) -Pattern '^(<<<<<<< |>>>>>>> |=======$)'
+          if ($markers) {
+            $markers | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line)" }
+            throw "Committed conflict markers found; resolve them before merging."
+          }
+
       - name: Install Rust (stable, MSVC)
         # Pinned to a SHA, so the toolchain must be given explicitly (a SHA conveys no version).
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
