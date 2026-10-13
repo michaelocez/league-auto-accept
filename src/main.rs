@@ -180,7 +180,7 @@ fn main() {
                 }
                 let outcome = cx.update(|app| {
                     view.update(app, |dashboard, cx| {
-                        let outcome = dashboard.apply_event(event);
+                        let outcome = dashboard.apply_event(event, cx);
                         cx.notify();
                         outcome
                     })

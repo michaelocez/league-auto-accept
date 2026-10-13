@@ -99,7 +99,6 @@ impl Dashboard {
             |this, state, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.webhook_draft = state.read(cx).value().to_string();
-                    this.schedule_settings_write(cx);
                     cx.notify();
                 }
             },
@@ -128,9 +127,9 @@ impl Dashboard {
         );
         let subscriptions = vec![
             subscription,
-            Self::template_subscription(&queue_popped, "queuePopped", window, cx),
-            Self::template_subscription(&auto_accepted, "autoAccepted", window, cx),
-            Self::template_subscription(&game_started, "gameStarted", window, cx),
+            Self::template_subscription(&queue_popped, window, cx),
+            Self::template_subscription(&auto_accepted, window, cx),
+            Self::template_subscription(&game_started, window, cx),
         ];
 
         Self {
@@ -171,20 +170,19 @@ impl Dashboard {
         })
     }
 
-    /// Persists a template edit as the user types. `{mentions}` is substituted at send time.
+    /// Schedules a template write as the user types; the debounce collapses a burst of keystrokes
+    /// into one write. `{mentions}` is substituted at send time.
     fn template_subscription(
         input: &Entity<InputState>,
-        key: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe_in(
             input,
             window,
-            move |this, state, event: &InputEvent, _window, cx| {
+            move |this, _state, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    let value = state.read(cx).value().to_string();
-                    this.persist(json!({ "notificationMessages": { key: value } }));
+                    this.schedule_settings_write(cx);
                     cx.notify();
                 }
             },
@@ -229,23 +227,31 @@ impl Dashboard {
                 .timer(SETTINGS_WRITE_DEBOUNCE)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.flush_settings_write();
+                this.flush_settings_write(cx);
                 cx.notify();
             });
         }));
     }
 
-    /// Writes the edited text settings now instead of waiting for the debounce — used by actions
-    /// that must act on what the user just typed (sending a test webhook) and before quitting.
-    pub fn flush_settings_write(&mut self) {
-        self.persist(json!({ "discordWebhookUrl": self.webhook_draft.clone() }));
+    /// Writes the edited message templates now instead of waiting for the debounce, so the last
+    /// keystrokes before quitting are not lost. The values are read from the inputs, which always
+    /// hold the newest text.
+    pub fn flush_settings_write(&mut self, cx: &mut Context<Self>) {
+        let patch = json!({
+            "notificationMessages": {
+                "queuePopped": self.templates.queue_popped.read(cx).value().to_string(),
+                "autoAccepted": self.templates.auto_accepted.read(cx).value().to_string(),
+                "gameStarted": self.templates.game_started.read(cx).value().to_string(),
+            }
+        });
+        self.persist(patch);
     }
 
-    pub fn apply_event(&mut self, event: AppEvent) -> EventOutcome {
+    pub fn apply_event(&mut self, event: AppEvent, cx: &mut Context<Self>) -> EventOutcome {
         match event {
             AppEvent::Tray(TrayCommand::ShowWindow) => return EventOutcome::ShowWindow,
             AppEvent::Tray(TrayCommand::Quit) => {
-                self.flush_settings_write();
+                self.flush_settings_write(cx);
                 return EventOutcome::Quit;
             }
             // Handled by the shell (opens the tray popup window); nothing to apply here.
@@ -646,8 +652,6 @@ impl Dashboard {
                     if this.state.webhook_testing {
                         return;
                     }
-                    // The test must use the URL as typed, even if its debounced write is pending.
-                    this.flush_settings_write();
                     this.state.webhook_test = None;
                     this.state.webhook_testing = true;
                     let _ = this
