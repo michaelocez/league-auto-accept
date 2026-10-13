@@ -209,6 +209,23 @@ mod tests {
         out
     }
 
+    /// Builds a server frame using the 16-bit or 64-bit extended length when required.
+    fn server_frame_ext(opcode: u8, payload: &[u8], finished: bool) -> Vec<u8> {
+        let mut out = vec![(if finished { 0x80 } else { 0 }) | opcode];
+        if payload.len() < 126 {
+            out.push(payload.len() as u8);
+        } else if payload.len() < 65536 {
+            out.push(126);
+            out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        } else {
+            out.push(127);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        }
+        out.extend_from_slice(payload);
+        out
+    }
+
     #[test]
     fn decodes_complete_and_fragmented_text_messages() {
         let mut decoder = WebSocketFrameDecoder::new(1024);
@@ -246,6 +263,124 @@ mod tests {
             decoder.push(&server_frame(0x1, b"12345", true)),
             Err(FrameError::FrameTooLarge)
         );
+    }
+
+    #[test]
+    fn decodes_extended_payload_lengths() {
+        let mut decoder = WebSocketFrameDecoder::new(1 << 20);
+        let medium = vec![b'a'; 200];
+        assert_eq!(
+            decoder.push(&server_frame_ext(0x1, &medium, true)).unwrap(),
+            vec![DecodedFrame::Text("a".repeat(200))]
+        );
+        let large = vec![b'b'; 70_000];
+        assert_eq!(
+            decoder.push(&server_frame_ext(0x1, &large, true)).unwrap(),
+            vec![DecodedFrame::Text("b".repeat(70_000))]
+        );
+    }
+
+    #[test]
+    fn returns_every_frame_decoded_from_one_push() {
+        let mut decoder = WebSocketFrameDecoder::new(1024);
+        let mut chunk = server_frame(0x1, b"first", true);
+        chunk.extend_from_slice(&server_frame(0x1, b"second", true));
+        assert_eq!(
+            decoder.push(&chunk).unwrap(),
+            vec![
+                DecodedFrame::Text("first".into()),
+                DecodedFrame::Text("second".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn surfaces_close_and_ignores_pong() {
+        let mut decoder = WebSocketFrameDecoder::new(1024);
+        assert_eq!(
+            decoder
+                .push(&server_frame(0x8, &[0x03, 0xE8], true))
+                .unwrap(),
+            vec![DecodedFrame::Close(vec![0x03, 0xE8])]
+        );
+        assert_eq!(
+            decoder.push(&server_frame(0xA, b"pong", true)).unwrap(),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn rejects_reserved_bits_and_unknown_opcodes() {
+        // A rejected frame leaves the decoder's buffer untouched, so use a fresh decoder per case.
+        assert_eq!(
+            WebSocketFrameDecoder::new(1024).push(&[0xC1, 0x00]),
+            Err(FrameError::ReservedBits)
+        );
+        assert_eq!(
+            WebSocketFrameDecoder::new(1024).push(&[0x83, 0x00]),
+            Err(FrameError::UnsupportedOpcode)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_control_frames() {
+        let mut decoder = WebSocketFrameDecoder::new(1024);
+        // A control frame must not be fragmented.
+        assert_eq!(
+            decoder.push(&server_frame(0x9, b"hi", false)),
+            Err(FrameError::InvalidControlFrame)
+        );
+    }
+
+    #[test]
+    fn rejects_continuations_without_a_message_and_interleaved_messages() {
+        let mut decoder = WebSocketFrameDecoder::new(1024);
+        assert_eq!(
+            decoder.push(&server_frame(0x0, b"orphan", true)),
+            Err(FrameError::UnexpectedContinuation)
+        );
+
+        let mut decoder = WebSocketFrameDecoder::new(1024);
+        assert_eq!(
+            decoder.push(&server_frame(0x1, b"start", false)).unwrap(),
+            vec![]
+        );
+        assert_eq!(
+            decoder.push(&server_frame(0x1, b"again", true)),
+            Err(FrameError::InterleavedMessage)
+        );
+    }
+
+    #[test]
+    fn rejects_a_buffer_that_outgrows_its_limit_without_a_complete_frame() {
+        let mut decoder = WebSocketFrameDecoder::new(4);
+        // A frame header claiming 16 payload bytes that never arrive, padded past the buffer cap.
+        let mut chunk = vec![0x81, 0x7E, 0x00, 0x10];
+        chunk.extend_from_slice(&[0u8; 15]);
+        assert_eq!(decoder.push(&chunk), Err(FrameError::BufferExceeded));
+    }
+
+    #[test]
+    fn rejects_a_fragmented_message_that_outgrows_the_limit() {
+        let mut decoder = WebSocketFrameDecoder::new(4);
+        assert_eq!(
+            decoder.push(&server_frame(0x1, b"abc", false)).unwrap(),
+            vec![]
+        );
+        assert_eq!(
+            decoder.push(&server_frame(0x0, b"de", false)),
+            Err(FrameError::FragmentedMessageExceeded)
+        );
+    }
+
+    #[test]
+    fn rejects_a_frame_whose_64_bit_length_exceeds_the_limit() {
+        let mut decoder = WebSocketFrameDecoder::new(1024);
+        // 64-bit length with a non-zero high word is rejected before any payload is read.
+        let mut chunk = vec![0x81, 0x7F];
+        chunk.extend_from_slice(&1u32.to_be_bytes());
+        chunk.extend_from_slice(&0u32.to_be_bytes());
+        assert_eq!(decoder.push(&chunk), Err(FrameError::FrameTooLarge));
     }
 
     #[test]
