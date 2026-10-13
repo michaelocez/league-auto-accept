@@ -1,7 +1,8 @@
 //! Settings persistence: atomic load/save with an encrypted webhook secret.
 //!
-//! Writes are atomic (temp file + rename), corrupt files recover to defaults, and the webhook
-//! secret is stored as `{protection, value}` separate from the plain settings.
+//! Writes are atomic (temp file + rename), a malformed file is preserved as `settings.json.invalid`
+//! before defaults replace it, and the webhook secret is stored as `{protection, value}` separate
+//! from the plain settings.
 
 use std::path::{Path, PathBuf};
 
@@ -67,13 +68,55 @@ impl SettingsStore {
         &self.path
     }
 
-    /// Loads settings, creating defaults (and persisting them) when the file is absent or corrupt.
+    /// Loads settings, creating defaults (and persisting them) when the file is absent or malformed.
+    ///
+    /// Recovering to defaults must never destroy what the user had: a file that cannot be parsed is
+    /// moved to `settings.json.invalid` first, so a webhook, mention list or preference lost to one
+    /// malformed byte stays recoverable. A file that merely cannot be *read* right now — a lock, an
+    /// antivirus scan, a permission the user will fix — is left untouched, and the caller keeps
+    /// running on defaults in memory until the next successful load.
     pub fn load(&mut self) -> Result<AppSettings, StoreError> {
-        if self.try_load().is_err() {
-            self.settings = AppSettings::default();
-            self.save()?;
+        match self.try_load() {
+            Ok(()) => Ok(self.snapshot()),
+            Err(StoreError::Json(error)) => {
+                log::warn!(
+                    "settings file {} is not valid JSON: {error}",
+                    self.path.display()
+                );
+                self.preserve_unreadable_file()?;
+                self.settings = AppSettings::default();
+                self.save()?;
+                Ok(self.snapshot())
+            }
+            // Nothing to replace means nothing to preserve: this is a first run.
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.settings = AppSettings::default();
+                self.save()?;
+                Ok(self.snapshot())
+            }
+            Err(error) => Err(error),
         }
-        Ok(self.snapshot())
+    }
+
+    /// Moves an unreadable settings file aside to `settings.json.invalid`.
+    ///
+    /// A missing file is not corruption — the defaults are simply created — so there is nothing to
+    /// preserve and no error. Any other refusal (for example a directory that cannot be written to)
+    /// propagates, so the file is left alone rather than overwritten.
+    fn preserve_unreadable_file(&self) -> Result<(), StoreError> {
+        let preserved = self.path.with_extension("json.invalid");
+        match std::fs::rename(&self.path, &preserved) {
+            Ok(()) => {
+                log::warn!(
+                    "settings file {} could not be read; preserved as {} before restoring defaults",
+                    self.path.display(),
+                    preserved.display()
+                );
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Applies a partial patch, persists, and returns the new settings.
@@ -204,12 +247,57 @@ mod tests {
     #[test]
     fn recovers_from_a_corrupt_settings_file() {
         let root = tempdir().unwrap();
-        std::fs::write(root.path().join("settings.json"), "{not-json").unwrap();
+        let path = root.path().join("settings.json");
+        std::fs::write(&path, "{not-json").unwrap();
+
         let settings = SettingsStore::new(root.path(), Box::new(FakeCodec))
             .load()
             .unwrap();
         assert!(!settings.auto_accept_enabled);
         assert!(settings.notification_events.auto_accepted);
+
+        // The malformed file is kept instead of being overwritten...
+        let preserved = root.path().join("settings.json.invalid");
+        assert_eq!(std::fs::read_to_string(&preserved).unwrap(), "{not-json");
+        // ...and the file in its place parses cleanly again.
+        let restored = std::fs::read_to_string(&path).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&restored).is_ok());
+
+        // Reloading a healthy store must not disturb the preserved original.
+        SettingsStore::new(root.path(), Box::new(FakeCodec))
+            .load()
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&preserved).unwrap(), "{not-json");
+    }
+
+    /// A read failure is not corruption: the file may be locked by another process or an antivirus
+    /// scan, so it stays exactly as it is and the caller runs on defaults in memory.
+    #[test]
+    fn leaves_an_unreadable_file_untouched() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        std::fs::create_dir(&path).unwrap();
+
+        let error = SettingsStore::new(root.path(), Box::new(FakeCodec))
+            .load()
+            .expect_err("a directory cannot be read as settings");
+        assert!(matches!(error, StoreError::Io(_)));
+        assert!(path.is_dir());
+        assert!(!root.path().join("settings.json.invalid").exists());
+    }
+
+    #[test]
+    fn creates_the_directory_and_defaults_when_nothing_exists_yet() {
+        let root = tempdir().unwrap();
+        let directory = root.path().join("League Auto Accept");
+        assert!(!directory.exists());
+
+        let mut store = SettingsStore::new(&directory, Box::new(FakeCodec));
+        let defaults = store.load().unwrap();
+
+        assert!(defaults.minimize_to_tray);
+        assert!(directory.join("settings.json").exists());
+        assert!(!directory.join("settings.json.invalid").exists());
     }
 
     #[test]
