@@ -7,12 +7,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use gpui::base::input::{Input, InputEvent, InputState};
 use gpui::prelude::*;
 use gpui::{
     div, px, ClickEvent, Context, Entity, FocusHandle, IntoElement, Render, Rgba, Subscription,
-    Window,
+    Task, Window,
 };
 use serde_json::json;
 
@@ -34,6 +35,10 @@ use crate::ui::components::{
 };
 use crate::ui::shell::{PageHeader, Screen, Sidebar, TitleBar};
 use crate::ui::theme::{self, Appearance, SurfaceTreatment, Theme};
+
+/// How long a text edit settles before the settings file is written. A write re-encodes the whole
+/// file, so a burst of keystrokes is coalesced into one, as in the reference implementation.
+const SETTINGS_WRITE_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// Which boolean setting a toggle row switch controls.
 #[derive(Clone, Copy)]
@@ -63,6 +68,8 @@ pub struct Dashboard {
     mention_nickname: Entity<InputState>,
     mention_id: Entity<InputState>,
     mention_error: Option<String>,
+    /// A pending debounced settings write; dropping it cancels the write.
+    pending_write: Option<Task<()>>,
     templates: MessageTemplates,
     #[allow(dead_code)]
     subscriptions: Vec<Subscription>,
@@ -120,9 +127,9 @@ impl Dashboard {
         );
         let subscriptions = vec![
             subscription,
-            Self::template_subscription(&queue_popped, "queuePopped", window, cx),
-            Self::template_subscription(&auto_accepted, "autoAccepted", window, cx),
-            Self::template_subscription(&game_started, "gameStarted", window, cx),
+            Self::template_subscription(&queue_popped, window, cx),
+            Self::template_subscription(&auto_accepted, window, cx),
+            Self::template_subscription(&game_started, window, cx),
         ];
 
         Self {
@@ -136,6 +143,7 @@ impl Dashboard {
             mention_nickname,
             mention_id,
             mention_error: None,
+            pending_write: None,
             templates: MessageTemplates {
                 queue_popped,
                 auto_accepted,
@@ -162,20 +170,19 @@ impl Dashboard {
         })
     }
 
-    /// Persists a template edit as the user types. `{mentions}` is substituted at send time.
+    /// Schedules a template write as the user types; the debounce collapses a burst of keystrokes
+    /// into one write. `{mentions}` is substituted at send time.
     fn template_subscription(
         input: &Entity<InputState>,
-        key: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe_in(
             input,
             window,
-            move |this, state, event: &InputEvent, _window, cx| {
+            move |this, _state, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    let value = state.read(cx).value().to_string();
-                    this.persist(json!({ "notificationMessages": { key: value } }));
+                    this.schedule_settings_write(cx);
                     cx.notify();
                 }
             },
@@ -211,10 +218,42 @@ impl Dashboard {
         platform_window::set_hide_on_close(self.state.settings.minimize_to_tray);
     }
 
-    pub fn apply_event(&mut self, event: AppEvent) -> EventOutcome {
+    /// Schedules one settings write [`SETTINGS_WRITE_DEBOUNCE`] after the last text edit. Each call
+    /// replaces the previous task, and dropping a task cancels it, so a burst of keystrokes writes
+    /// the file once.
+    fn schedule_settings_write(&mut self, cx: &mut Context<Self>) {
+        self.pending_write = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(SETTINGS_WRITE_DEBOUNCE)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.flush_settings_write(cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Writes the edited message templates now instead of waiting for the debounce, so the last
+    /// keystrokes before quitting are not lost. The values are read from the inputs, which always
+    /// hold the newest text.
+    pub fn flush_settings_write(&mut self, cx: &mut Context<Self>) {
+        let patch = json!({
+            "notificationMessages": {
+                "queuePopped": self.templates.queue_popped.read(cx).value().to_string(),
+                "autoAccepted": self.templates.auto_accepted.read(cx).value().to_string(),
+                "gameStarted": self.templates.game_started.read(cx).value().to_string(),
+            }
+        });
+        self.persist(patch);
+    }
+
+    pub fn apply_event(&mut self, event: AppEvent, cx: &mut Context<Self>) -> EventOutcome {
         match event {
             AppEvent::Tray(TrayCommand::ShowWindow) => return EventOutcome::ShowWindow,
-            AppEvent::Tray(TrayCommand::Quit) => return EventOutcome::Quit,
+            AppEvent::Tray(TrayCommand::Quit) => {
+                self.flush_settings_write(cx);
+                return EventOutcome::Quit;
+            }
             // Handled by the shell (opens the tray popup window); nothing to apply here.
             AppEvent::Tray(TrayCommand::OpenPopup) => {}
             AppEvent::Tray(TrayCommand::ToggleAutoAccept) => {
@@ -308,7 +347,6 @@ fn activity_color(kind: ActivityKind, t: &Theme) -> Rgba {
     match kind {
         ActivityKind::Info => t.text_muted,
         ActivityKind::Accepted => t.success,
-        ActivityKind::Warning => t.danger,
     }
 }
 
@@ -450,7 +488,8 @@ impl Dashboard {
             b: 0.0,
             a: 0.0,
         };
-        let last = self.state.activity.len() - 1;
+        // `last` only tags the final row, so an empty list must render nothing rather than underflow.
+        let last = self.state.activity.len().saturating_sub(1);
         let items: Vec<gpui::AnyElement> = self
             .state
             .activity

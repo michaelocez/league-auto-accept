@@ -14,7 +14,6 @@ pub struct ActivityItem {
 pub enum ActivityKind {
     Info,
     Accepted,
-    Warning,
 }
 
 const MAX_ACTIVITY: usize = 8;
