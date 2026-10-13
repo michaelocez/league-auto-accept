@@ -294,10 +294,28 @@ const fn rgb_a(hex: u32, a: f32) -> Rgba {
     }
 }
 
+/// Mirrors the active theme into the framework's global theme, which the text inputs resolve their
+/// caret, selection and placeholder colours from.
+///
+/// The input widget takes those colours from the framework's own tokens rather than from the
+/// `TextStyle` around it, and those tokens begin as the framework's *light* palette — which is why
+/// the insertion point stayed near-black, and so invisible, on the dark theme. Keeping those tokens
+/// in step with ours makes the caret and selection follow the app's appearance.
+fn sync_base_theme(cx: &mut App) {
+    let theme = Theme::of(cx);
+    let colors = &mut gpui::base::Theme::global_mut(cx).tokens.colors;
+    colors.foreground = theme.text.into();
+    colors.muted_foreground = theme.text_muted.into();
+    colors.accent = theme.accent.into();
+    colors.surface = theme.surface.into();
+    colors.border = theme.border.into();
+}
+
 /// Writes the active appearance to both the GPUI global and the process-local mirror.
 pub fn set_appearance(cx: &mut App, appearance: Appearance) {
     cx.set_global(appearance);
     ACTIVE.store(appearance as u8, Ordering::Relaxed);
+    sync_base_theme(cx);
 }
 
 /// The currently active appearance.
@@ -313,6 +331,7 @@ pub fn current() -> Appearance {
 pub fn set_treatment(cx: &mut App, treatment: SurfaceTreatment) {
     cx.set_global(treatment);
     TREATMENT.store(treatment as u8, Ordering::Relaxed);
+    sync_base_theme(cx);
 }
 
 /// The currently active surface treatment.

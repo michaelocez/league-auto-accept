@@ -586,7 +586,7 @@ impl Dashboard {
                     .flex_col()
                     .gap(theme::space_2())
                     .max_w(px(440.0))
-                    .child(Input::new(&self.webhook))
+                    .child(Self::input_frame(&self.webhook, cx))
                     .child(
                         div()
                             .flex()
@@ -713,6 +713,12 @@ impl Dashboard {
         let mentions = self.state.settings.discord_mentions.clone();
         let message_group = SettingsGroup::new()
             .title("Messages")
+            .child(
+                div()
+                    .text_size(theme::text_caption())
+                    .text_color(t.text_muted)
+                    .child("Use {mentions} where the mentioned people should appear."),
+            )
             .child(self.message_row("Match found", &self.templates.queue_popped, &mentions, cx))
             .child(self.message_row(
                 "Ready check accepted",
@@ -732,6 +738,20 @@ impl Dashboard {
             .into_any_element()
     }
 
+    /// Wraps a text input so it reads as an editable field. The input widget paints no frame of its
+    /// own, so the recessed background and hairline border are what mark it as a place to type.
+    fn input_frame(state: &Entity<InputState>, cx: &gpui::App) -> impl IntoElement {
+        let t = Theme::of(cx);
+        div()
+            .bg(t.bg)
+            .border_1()
+            .border_color(t.border)
+            .rounded(theme::radius_md())
+            .px(theme::space_3())
+            .py(theme::space_2())
+            .child(Input::new(state))
+    }
+
     /// A message template. The text is validated as it will be sent — with `{mentions}` expanded
     /// and the saved mentions substituted — so what is checked is the message Discord receives.
     fn message_row(
@@ -746,8 +766,11 @@ impl Dashboard {
         let error = content_error(&rendered);
 
         Row::new(label)
-            .description("Use {mentions} where the mentioned people should appear.")
-            .child(div().max_w(px(440.0)).child(Input::new(template)))
+            .child(
+                div()
+                    .max_w(px(440.0))
+                    .child(Self::input_frame(template, cx)),
+            )
             .when_some(error, |this, message| {
                 this.child(
                     div()
@@ -1066,13 +1089,13 @@ impl Dashboard {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(Input::new(&self.mention_nickname)),
+                    .child(Self::input_frame(&self.mention_nickname, cx)),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(Input::new(&self.mention_id)),
+                    .child(Self::input_frame(&self.mention_id, cx)),
             )
             .child(
                 Button::new("add-mention", "Add")
