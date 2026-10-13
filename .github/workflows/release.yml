@@ -51,6 +51,22 @@ jobs:
           }
           Get-Item -LiteralPath $exe | Select-Object FullName, Length
 
+      - name: Verify the executable is self-contained
+        # The static CRT from .cargo/config.toml is what lets the portable release run on a clean
+        # machine. A dynamic import of the C runtime would silently require the VC++ Redistributable,
+        # which only shows up on a machine that does not have it, so assert it here instead.
+        shell: pwsh
+        run: |
+          $exe = "target/release/league-auto-accept.exe"
+          $imports = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($exe))
+          $dynamic = @("VCRUNTIME140", "MSVCP140", "ucrtbase", "api-ms-win-crt-") |
+            Where-Object { $imports.Contains($_) }
+          if ($dynamic) {
+            Write-Error "Release build links the C runtime dynamically: $($dynamic -join ', ')"
+            exit 1
+          }
+          Write-Host "Release build has no dynamic C runtime imports."
+
       - name: Attach executable to the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
