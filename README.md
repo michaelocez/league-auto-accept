@@ -45,16 +45,11 @@ creates is its own per-user settings file (see [Configuration](#configuration)).
   the League Client is connected; the UI shows `Active`, `Connecting`, `League offline`, or
   `Disabled` so you always know the real state.
 - **Notifications**: open the Notifications page, enable Discord notifications, paste a Discord
-<<<<<<< HEAD
   webhook URL and press **Save** (the field starts empty and the saved URL is never shown back),
   optionally add people to mention (nickname + Discord user ID), and use **Test Webhook** to
-  verify.
-=======
-  webhook URL, optionally add people to mention (nickname + Discord user ID), and use **Test
-  Webhook** to verify. Each lifecycle event — queue popped, ready check accepted, game started —
-  has its own switch and its own editable message, with a live preview of exactly what will be
-  sent (use `{mentions}` where the mentioned people should appear; up to 5 are ever mentioned).
->>>>>>> origin/main
+  verify. Each lifecycle event — queue popped, ready check accepted, game started — has its own
+  switch and its own editable message, with a live preview of exactly what will be sent (use
+  `{mentions}` where the mentioned people should appear; up to 5 are ever mentioned).
 - **Appearance**: on the Settings page choose **Dark** or **Light**, and a window backdrop —
   **Opaque** (default), **Mica**, or **Acrylic**. Your choices are saved and restored on next
   launch.
