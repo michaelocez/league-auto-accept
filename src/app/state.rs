@@ -79,6 +79,8 @@ pub struct AppState {
     pub webhook_test: Option<WebhookResult>,
     /// Whether a Test Webhook request is in flight.
     pub webhook_testing: bool,
+    /// Why the last settings write failed, if it did. The change is still applied in memory.
+    pub settings_error: Option<String>,
 }
 
 impl AppState {
@@ -92,6 +94,7 @@ impl AppState {
             webhook_status,
             webhook_test: None,
             webhook_testing: false,
+            settings_error: None,
         }
     }
 
