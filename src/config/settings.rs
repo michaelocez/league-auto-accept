@@ -85,7 +85,7 @@ impl Default for AppSettings {
                 game_started: false,
             },
             notification_messages: NotificationMessages {
-                queue_popped: "{mentions} your League queue has popped.".into(),
+                queue_popped: "{mentions} your match was found.".into(),
                 auto_accepted: "{mentions} the ready check was automatically accepted.".into(),
                 game_started: "{mentions} the game is now in progress.".into(),
             },

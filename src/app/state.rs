@@ -113,7 +113,7 @@ impl AppState {
             }
             ServiceEvent::Lifecycle(lifecycle) => {
                 let (label, kind) = match lifecycle {
-                    Lifecycle::QueuePopped => ("Queue popped", ActivityKind::Info),
+                    Lifecycle::QueuePopped => ("Match found", ActivityKind::Info),
                     Lifecycle::AutoAccepted => {
                         ("Ready check auto-accepted", ActivityKind::Accepted)
                     }
@@ -184,7 +184,7 @@ mod tests {
         assert_eq!(state.ready_check, ReadyCheckStatus::Ready);
 
         state.apply_service_event(&ServiceEvent::Lifecycle(Lifecycle::QueuePopped));
-        assert_eq!(state.activity[0].label, "Queue popped");
+        assert_eq!(state.activity[0].label, "Match found");
 
         for _ in 0..20 {
             state.apply_service_event(&ServiceEvent::Lifecycle(Lifecycle::GameStarted));

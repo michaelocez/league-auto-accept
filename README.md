@@ -13,7 +13,7 @@ service or driver, no telemetry, and no remote content in the UI.
   against its loopback LCU API.
 - **Monitors ready checks** over the LCU WebSocket and **auto-accepts** them — one accept per ready
   check, with bounded retries, cancellation, and reconnect handling.
-- **Discord notifications**: webhook alerts for queue popped,
+- **Discord notifications**: webhook alerts for match found,
   auto-accepted, and game-started, with optional `{mentions}` of up to five Discord users.
 - **Appearance**: **Dark** and **Light** themes, plus a window backdrop of **Opaque**,
   **Mica** (subtle, samples the desktop wallpaper) or **Acrylic** (blurs what is behind the window
@@ -47,9 +47,9 @@ creates is its own per-user settings file (see [Configuration](#configuration)).
 - **Notifications**: open the Notifications page, enable Discord notifications, paste a Discord
   webhook URL and press **Save** (the field starts empty and the saved URL is never shown back),
   optionally add people to mention (nickname + Discord user ID), and use **Test Webhook** to
-  verify. Each lifecycle event — queue popped, ready check accepted, game started — has its own
-  switch and its own editable message, with a live preview of exactly what will be sent (use
-  `{mentions}` where the mentioned people should appear; up to 5 are ever mentioned).
+  verify. Each lifecycle event — match found, ready check accepted, game started — has its own
+  switch and its own editable message (use `{mentions}` where the mentioned people should appear;
+  up to 5 are ever mentioned).
 - **Appearance**: on the Settings page choose **Dark** or **Light**, and a window backdrop —
   **Opaque** (default), **Mica**, or **Acrylic**. Your choices are saved and restored on next
   launch.

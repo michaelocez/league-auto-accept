@@ -674,7 +674,7 @@ impl Dashboard {
             .child(Self::toggle_row(
                 "toggle-discord",
                 "Enable Discord notifications",
-                "Queue popped, auto-accepted and game-started alerts.",
+                "Match-found, auto-accepted and game-started alerts.",
                 discord_enabled,
                 ToggleSetting::DiscordNotifications,
                 cx,
@@ -687,8 +687,8 @@ impl Dashboard {
             .title("Events")
             .child(Self::toggle_row(
                 "toggle-queue-popped",
-                "Queue popped",
-                "Sent when your queue pops.",
+                "Match found",
+                "Sent when a match is found and the ready check appears.",
                 events.queue_popped,
                 ToggleSetting::QueuePopped,
                 cx,
@@ -713,7 +713,7 @@ impl Dashboard {
         let mentions = self.state.settings.discord_mentions.clone();
         let message_group = SettingsGroup::new()
             .title("Messages")
-            .child(self.message_row("Queue popped", &self.templates.queue_popped, &mentions, cx))
+            .child(self.message_row("Match found", &self.templates.queue_popped, &mentions, cx))
             .child(self.message_row(
                 "Ready check accepted",
                 &self.templates.auto_accepted,
@@ -732,8 +732,8 @@ impl Dashboard {
             .into_any_element()
     }
 
-    /// A message template with a live preview of exactly what would be sent for it, rendered
-    /// locally with the saved mentions (no network).
+    /// A message template. The text is validated as it will be sent — with `{mentions}` expanded
+    /// and the saved mentions substituted — so what is checked is the message Discord receives.
     fn message_row(
         &self,
         label: &'static str,
@@ -742,42 +742,20 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> Row {
         let t = Theme::of(cx);
-        let text = template.read(cx).value().to_string();
-        let rendered = preview_notification(&text, mentions);
+        let rendered = preview_notification(&template.read(cx).value(), mentions);
         let error = content_error(&rendered);
-        let preview = if rendered.is_empty() {
-            "…".to_string()
-        } else {
-            rendered
-        };
 
         Row::new(label)
             .description("Use {mentions} where the mentioned people should appear.")
             .child(div().max_w(px(440.0)).child(Input::new(template)))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(theme::space_1())
-                    .child(
-                        div()
-                            .px(theme::space_3())
-                            .py(theme::space_2())
-                            .bg(t.surface_hover)
-                            .rounded(theme::radius_md())
-                            .text_size(theme::text_small())
-                            .text_color(t.text_muted)
-                            .child(preview),
-                    )
-                    .when_some(error, |this, message| {
-                        this.child(
-                            div()
-                                .text_size(theme::text_caption())
-                                .text_color(t.danger)
-                                .child(message),
-                        )
-                    }),
-            )
+            .when_some(error, |this, message| {
+                this.child(
+                    div()
+                        .text_size(theme::text_caption())
+                        .text_color(t.danger)
+                        .child(message),
+                )
+            })
     }
 
     fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
