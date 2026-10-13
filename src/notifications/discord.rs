@@ -50,11 +50,87 @@ impl WebhookResult {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The Discord webhook URL — the application's only secret.
+///
+/// The value is readable only through `expose`, and `Debug` is redacted, so it cannot leak through
+/// a log line or through derived `Debug` on an enclosing type.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct WebhookSecret(String);
+
+impl WebhookSecret {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self(url.into().trim().to_string())
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.0.is_empty()
+    }
+
+    /// Non-secret status: whether a webhook is set, and the (allowlisted) host it points at.
+    pub fn status(&self) -> WebhookStatus {
+        WebhookStatus {
+            configured: self.is_configured(),
+            host: parse_discord_webhook_url(&self.0).map(|target| target.host),
+        }
+    }
+
+    /// The raw URL. Only the notification sender may call this.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for WebhookSecret {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for WebhookSecret {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl std::fmt::Debug for WebhookSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WebhookSecret(<redacted>)")
+    }
+}
+
+/// A secret-free description of the configured webhook, safe to hold in application state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WebhookStatus {
+    pub configured: bool,
+    pub host: Option<String>,
+}
+
+impl WebhookStatus {
+    /// Short status label for the UI; never contains the secret.
+    pub fn label(&self) -> String {
+        match (&self.configured, &self.host) {
+            (false, _) => "Not configured".to_string(),
+            (true, Some(host)) => format!("Configured · {host}"),
+            (true, None) => "Configured".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct WebhookRequest {
-    pub url: String,
+    pub url: WebhookSecret,
     pub content: String,
     pub user_ids: Vec<String>,
+}
+
+impl std::fmt::Debug for WebhookRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookRequest")
+            .field("url", &self.url)
+            .field("content", &self.content)
+            .field("user_ids", &self.user_ids)
+            .finish()
+    }
 }
 
 pub type WebhookFuture = Pin<Box<dyn Future<Output = WebhookResult> + Send + 'static>>;
@@ -202,7 +278,7 @@ impl DiscordSender for DiscordWebhookClient {
             }
         };
         Box::pin(async move {
-            let Some(target) = parse_discord_webhook_url(&request.url) else {
+            let Some(target) = parse_discord_webhook_url(request.url.expose()) else {
                 return WebhookResult::failure("Enter a valid Discord webhook URL.");
             };
             let content = request.content.trim();
@@ -348,6 +424,32 @@ mod tests {
                 "{value:?} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn webhook_secret_is_redacted_and_reports_non_secret_status() {
+        let id = "1".repeat(17);
+        let secret =
+            WebhookSecret::new(format!("https://discord.com/api/webhooks/{id}/{}", token()));
+        assert!(secret.is_configured());
+        assert_eq!(secret.status().host.as_deref(), Some("discord.com"));
+        assert_eq!(secret.status().label(), "Configured · discord.com");
+
+        let debugged = format!("{secret:?}");
+        assert_eq!(debugged, "WebhookSecret(<redacted>)");
+        assert!(!debugged.contains("discord.com"));
+
+        let request = WebhookRequest {
+            url: secret,
+            content: "test".into(),
+            user_ids: Vec::new(),
+        };
+        let rendered = format!("{request:?}");
+        assert!(!rendered.contains("discord.com"), "{rendered}");
+
+        let empty = WebhookSecret::new("");
+        assert!(!empty.is_configured());
+        assert_eq!(empty.status().label(), "Not configured");
     }
 
     #[test]

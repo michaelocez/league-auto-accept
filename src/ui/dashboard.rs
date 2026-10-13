@@ -81,14 +81,16 @@ impl Dashboard {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let webhook_draft = settings.discord_webhook_url.clone();
+        // The saved secret is never read into the view: the field starts empty, and only a newly
+        // typed URL (or a removal) can change what is stored, through the store's typed setter.
+        let webhook_draft = String::new();
+        let webhook_status = store.borrow().webhook_status();
         let subscription = cx.subscribe_in(
             &webhook,
             window,
             |this, state, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.webhook_draft = state.read(cx).value().to_string();
-                    this.persist(json!({ "discordWebhookUrl": this.webhook_draft.clone() }));
                     cx.notify();
                 }
             },
@@ -123,7 +125,7 @@ impl Dashboard {
         ];
 
         Self {
-            state: AppState::new(settings),
+            state: AppState::new(settings, webhook_status),
             store,
             enabled_flag,
             settings_shared,
@@ -222,6 +224,39 @@ impl Dashboard {
         self.state.settings.auto_accept_enabled = enabled;
         self.enabled_flag.store(enabled, Ordering::Relaxed);
         self.persist(json!({ "autoAcceptEnabled": enabled }));
+    }
+
+    /// Stores the typed webhook through the store's validating setter. The view never reads the
+    /// stored value back — only the non-secret status changes.
+    fn save_webhook(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let outcome = self.store.borrow_mut().set_webhook(&self.webhook_draft);
+        match outcome {
+            Ok(()) => {
+                self.state.webhook_status = self.store.borrow().webhook_status();
+                self.state.webhook_test = None;
+                self.webhook_draft.clear();
+                let input = self.webhook.clone();
+                input.update(cx, |state, cx| {
+                    state.set_value(String::new(), window, cx);
+                });
+            }
+            Err(error) => {
+                log::error!("failed to save the Discord webhook: {error}");
+            }
+        }
+        cx.notify();
+    }
+
+    /// Removes the stored webhook. The view cannot do this through a settings patch.
+    fn clear_webhook(&mut self, cx: &mut Context<Self>) {
+        match self.store.borrow_mut().clear_webhook() {
+            Ok(()) => {
+                self.state.webhook_status = self.store.borrow().webhook_status();
+                self.state.webhook_test = None;
+            }
+            Err(error) => log::error!("failed to clear the Discord webhook: {error}"),
+        }
+        cx.notify();
     }
 
     /// Applies a translucent backdrop treatment, falling back to opaque when the OS has no DWM
@@ -467,13 +502,16 @@ impl Dashboard {
         let t = Theme::of(cx);
         let discord_enabled = self.state.settings.discord_notifications_enabled;
         let testing = self.state.webhook_testing;
-        let webhook_error = if self.webhook_draft.trim().is_empty() {
+        let draft = self.webhook_draft.trim().to_string();
+        let webhook_error = if draft.is_empty() {
             String::new()
-        } else if parse_discord_webhook_url(&self.webhook_draft).is_none() {
+        } else if parse_discord_webhook_url(&draft).is_none() {
             "Enter a valid Discord webhook URL.".to_string()
         } else {
             String::new()
         };
+        let can_save = !draft.is_empty() && webhook_error.is_empty();
+        let webhook_configured = self.state.webhook_status.configured;
         let (test_message, test_color) = if testing {
             ("Sending test webhook…".to_string(), t.text_muted)
         } else {
@@ -488,8 +526,49 @@ impl Dashboard {
         };
 
         let mut webhook_row = Row::new("Webhook URL")
-            .description("Stored in the privileged backend; never shown to other apps.")
-            .child(div().max_w(px(440.0)).child(Input::new(&self.webhook)));
+            .description("Encrypted at rest and read only by the notification service; this window shows whether one is saved, never the URL itself.")
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme::space_2())
+                    .max_w(px(440.0))
+                    .child(Input::new(&self.webhook))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme::space_3())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_size(theme::text_caption())
+                                    .text_color(t.text_muted)
+                                    .child(self.state.webhook_status.label()),
+                            )
+                            .child(
+                                Button::new("save-webhook", "Save")
+                                    .variant(ButtonVariant::Secondary)
+                                    .disabled(!can_save)
+                                    .on_click(cx.listener(
+                                        |this, _event: &ClickEvent, window, cx| {
+                                            this.save_webhook(window, cx);
+                                        },
+                                    )),
+                            )
+                            .child(
+                                Button::new("clear-webhook", "Remove")
+                                    .variant(ButtonVariant::Ghost)
+                                    .disabled(!webhook_configured)
+                                    .on_click(cx.listener(
+                                        |this, _event: &ClickEvent, _window, cx| {
+                                            this.clear_webhook(cx);
+                                        },
+                                    )),
+                            ),
+                    ),
+            );
         if !webhook_error.is_empty() {
             webhook_row = webhook_row.child(
                 div()

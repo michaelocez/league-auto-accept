@@ -26,13 +26,13 @@ use league_auto_accept::league::transport::{
 const PASSWORD: &str = "local-secret";
 
 fn credentials(port: u16) -> LcuCredentials {
-    LcuCredentials {
-        install_path: PathBuf::new(),
-        process_name: "LeagueClientUx".into(),
-        process_id: 1,
+    LcuCredentials::new(
+        PathBuf::new(),
+        "LeagueClientUx".into(),
+        1,
         port,
-        password: PASSWORD.into(),
-    }
+        PASSWORD.into(),
+    )
 }
 
 fn expected_authorization() -> String {
@@ -120,6 +120,33 @@ async fn spawn_mock_rest(port_holder: tokio::sync::oneshot::Sender<u16>) {
     }
 }
 
+<<<<<<< HEAD
+/// A mock LCU HTTPS endpoint that answers every request with one status.
+async fn spawn_status_only_rest(port_holder: tokio::sync::oneshot::Sender<u16>, status: u16) {
+    let (config, _cert) = server_config();
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    port_holder
+        .send(listener.local_addr().unwrap().port())
+        .unwrap();
+
+    loop {
+        let Ok((tcp, _)) = listener.accept().await else {
+            break;
+        };
+        let acceptor = acceptor.clone();
+        tokio::spawn(async move {
+            let Ok(mut tls) = acceptor.accept(tcp).await else {
+                return;
+            };
+            let mut chunk = [0u8; 4096];
+            let _ = tls.read(&mut chunk).await;
+            let response = http_response(status, "");
+            let _ = tls.write_all(response.as_bytes()).await;
+            let _ = tls.flush().await;
+        });
+    }
+=======
 /// Serves one TLS connection per client, answering the request head with `responder`'s bytes.
 ///
 /// An empty reply makes the server hold the connection open without answering, which is how the
@@ -173,6 +200,7 @@ where
     });
 
     port
+>>>>>>> origin/main
 }
 
 #[tokio::test]
@@ -192,12 +220,12 @@ async fn rest_transport_authenticates_parses_and_accepts() {
 async fn rest_transport_reports_non_success_status() {
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(spawn_mock_rest(tx));
+    tokio::spawn(spawn_status_only_rest(tx, 404));
     let port = rx.await.unwrap();
 
     let client = LcuRestClient::new(credentials(port));
-    // The mock returns 404 for any path other than the fixed endpoints it knows.
-    let error = client.get("/lol-nonexistent/v1/thing").await.unwrap_err();
+    // The client only ever calls its fixed endpoints; the mock answers this one with 404.
+    let error = client.verify().await.unwrap_err();
     match error {
         league_auto_accept::league::transport::TransportError::Http { status } => {
             assert_eq!(status, 404);

@@ -1,41 +1,45 @@
 //! LCU request construction and endpoint validation.
 //!
-//! Only endpoints under `/lol-` are ever reachable; the application itself uses only the fixed
-//! endpoints in `league::mod`.
+//! The client is restricted to the endpoints the application actually uses: `is_allowed_lcu_endpoint`
+//! is an exact match against `ALLOWED_LCU_ENDPOINTS` rather than a prefix check, so no other
+//! `/lol-` path is reachable.
 
+/// Every LCU endpoint the application may call.
+pub const ALLOWED_LCU_ENDPOINTS: [&str; 4] = [
+    crate::league::SUMMONER_ENDPOINT,
+    crate::league::GAMEFLOW_ENDPOINT,
+    crate::league::READY_CHECK_ENDPOINT,
+    crate::league::READY_CHECK_ACCEPT_ENDPOINT,
+];
+
+/// The only HTTP methods the application needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HttpMethod {
+pub(crate) enum HttpMethod {
     Get,
     Post,
-    Put,
-    Patch,
-    Delete,
 }
 
 impl HttpMethod {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             HttpMethod::Get => "GET",
             HttpMethod::Post => "POST",
-            HttpMethod::Put => "PUT",
-            HttpMethod::Patch => "PATCH",
-            HttpMethod::Delete => "DELETE",
         }
     }
 }
 
 /// A validated LCU request (method + allowed endpoint + optional JSON body).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LcuRequest {
-    pub method: HttpMethod,
-    pub endpoint: String,
-    pub body: Option<String>,
+pub(crate) struct LcuRequest {
+    pub(crate) method: HttpMethod,
+    pub(crate) endpoint: String,
+    pub(crate) body: Option<String>,
 }
 
 impl LcuRequest {
     /// Builds a request, rejecting unsupported methods/endpoints. The body, when present, must
     /// already be serialised JSON and is size-checked.
-    pub fn new(
+    pub(crate) fn new(
         method: HttpMethod,
         endpoint: &str,
         body: Option<String>,
@@ -76,72 +80,11 @@ impl std::fmt::Display for LcuRequestError {
 impl std::error::Error for LcuRequestError {}
 
 /// Maximum request body size (1 MiB).
-pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-/// Maximum endpoint length.
-pub const MAX_ENDPOINT_LEN: usize = 4096;
+pub(crate) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
-/// Validates an LCU endpoint.
-pub fn is_allowed_lcu_endpoint(endpoint: &str) -> bool {
-    if !endpoint.starts_with("/lol-") || endpoint.len() > MAX_ENDPOINT_LEN {
-        return false;
-    }
-    if contains_control_chars(endpoint) {
-        return false;
-    }
-    if endpoint
-        .chars()
-        .any(|c| c.is_ascii_whitespace() || c == '\\' || c == '#')
-    {
-        return false;
-    }
-    if contains_percent_encoded_separator(endpoint) {
-        return false;
-    }
-    // Reject absolute or protocol-relative forms.
-    if endpoint.starts_with("//") || looks_like_scheme(endpoint) {
-        return false;
-    }
-    true
-}
-
-fn contains_control_chars(value: &str) -> bool {
-    value.chars().any(|c| {
-        let code = c as u32;
-        code <= 31 || code == 127
-    })
-}
-
-fn contains_percent_encoded_separator(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    while index + 2 < bytes.len() {
-        if bytes[index] == b'%' {
-            let a = bytes[index + 1].to_ascii_lowercase();
-            let b = bytes[index + 2].to_ascii_lowercase();
-            if a == b'2' && (b == b'e' || b == b'f') || a == b'5' && b == b'c' {
-                return true;
-            }
-        }
-        index += 1;
-    }
-    false
-}
-
-fn looks_like_scheme(value: &str) -> bool {
-    let mut chars = value.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() => {}
-        _ => return false,
-    }
-    for c in chars {
-        if c == ':' {
-            return true;
-        }
-        if !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
-            return false;
-        }
-    }
-    false
+/// Validates an LCU endpoint against the fixed allowlist.
+pub(crate) fn is_allowed_lcu_endpoint(endpoint: &str) -> bool {
+    ALLOWED_LCU_ENDPOINTS.contains(&endpoint)
 }
 
 #[cfg(test)]
@@ -150,10 +93,28 @@ mod tests {
     use crate::league;
 
     #[test]
-    fn allows_league_client_api_paths() {
-        assert!(is_allowed_lcu_endpoint(league::SUMMONER_ENDPOINT));
-        assert!(is_allowed_lcu_endpoint(league::GAMEFLOW_ENDPOINT));
-        assert!(is_allowed_lcu_endpoint(league::READY_CHECK_ACCEPT_ENDPOINT));
+    fn allows_only_the_endpoints_the_application_uses() {
+        for endpoint in ALLOWED_LCU_ENDPOINTS {
+            assert!(is_allowed_lcu_endpoint(endpoint), "{endpoint:?}");
+        }
+        assert_eq!(ALLOWED_LCU_ENDPOINTS.len(), 4);
+    }
+
+    #[test]
+    fn rejects_lol_prefixed_paths_outside_the_allowlist() {
+        let invalid = [
+            "/lol-matchmaking/v1/ready-check/decline",
+            "/lol-summoner/v1/current-summoner/extra",
+            "/lol-gameflow/v1/session",
+            "/lol-chat/v1/friends",
+            "/lol-gameflow/v1/phase/",
+        ];
+        for value in invalid {
+            assert!(
+                !is_allowed_lcu_endpoint(value),
+                "{value:?} should be rejected"
+            );
+        }
     }
 
     #[test]
@@ -196,15 +157,8 @@ mod tests {
     }
 
     #[test]
-    fn allows_all_documented_methods() {
-        for method in [
-            HttpMethod::Get,
-            HttpMethod::Post,
-            HttpMethod::Put,
-            HttpMethod::Patch,
-            HttpMethod::Delete,
-        ] {
-            assert!(LcuRequest::new(method, league::GAMEFLOW_ENDPOINT, None).is_ok());
-        }
+    fn exposes_only_the_methods_the_application_uses() {
+        assert_eq!(HttpMethod::Get.as_str(), "GET");
+        assert_eq!(HttpMethod::Post.as_str(), "POST");
     }
 }

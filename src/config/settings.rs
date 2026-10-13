@@ -8,7 +8,6 @@ use serde_json::Value;
 
 pub const MAX_DISCORD_USER_IDS: usize = 5;
 pub const MAX_DISCORD_NICKNAME_LENGTH: usize = 40;
-pub const MAX_WEBHOOK_URL_LENGTH: usize = 2048;
 pub const MAX_NOTIFICATION_MESSAGE_LENGTH: usize = 1800;
 
 /// Current settings schema version.
@@ -56,14 +55,15 @@ pub struct NotificationMessages {
 }
 
 /// The complete, typed application settings (schema v3).
+///
+/// The Discord webhook — the only secret — is deliberately absent: it is owned by the settings
+/// store and the notification sender, never by application state, the tray or the UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub schema_version: u32,
     pub auto_accept_enabled: bool,
     pub discord_notifications_enabled: bool,
-    /// The only secret. Persisted separately, encrypted where the OS supports it.
-    pub discord_webhook_url: String,
     pub discord_mentions: Vec<DiscordMention>,
     pub notification_events: NotificationEvents,
     pub notification_messages: NotificationMessages,
@@ -78,7 +78,6 @@ impl Default for AppSettings {
             schema_version: SCHEMA_VERSION,
             auto_accept_enabled: false,
             discord_notifications_enabled: false,
-            discord_webhook_url: String::new(),
             discord_mentions: Vec::new(),
             notification_events: NotificationEvents {
                 queue_popped: false,
@@ -116,14 +115,6 @@ pub fn normalize_settings(value: &Value, fallback: &AppSettings) -> AppSettings 
             "discordNotificationsEnabled",
             fallback.discord_notifications_enabled,
         ),
-        discord_webhook_url: string(
-            source,
-            "discordWebhookUrl",
-            &fallback.discord_webhook_url,
-            MAX_WEBHOOK_URL_LENGTH,
-        )
-        .trim()
-        .to_string(),
         discord_mentions: normalize_mentions(source, fallback),
         notification_events: NotificationEvents {
             queue_popped: boolean(

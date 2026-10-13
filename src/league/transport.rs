@@ -26,8 +26,8 @@ use super::api::{HttpMethod, LcuRequest, LcuRequestError};
 use super::frame::{encode_masked, DecodedFrame, WebSocketFrameDecoder};
 use super::lockfile::LcuCredentials;
 use super::{
-    EVENT_SUBSCRIPTION_FRAME, GAMEFLOW_ENDPOINT, LCU_USERNAME, READY_CHECK_ACCEPT_ENDPOINT,
-    READY_CHECK_ENDPOINT, SUMMONER_ENDPOINT,
+    EVENT_SUBSCRIPTION_FRAME, GAMEFLOW_ENDPOINT, READY_CHECK_ACCEPT_ENDPOINT, READY_CHECK_ENDPOINT,
+    SUMMONER_ENDPOINT,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -126,13 +126,10 @@ fn tls_config() -> Result<Arc<ClientConfig>, TransportError> {
     Ok(Arc::new(config))
 }
 
-fn authorization(credentials: &LcuCredentials) -> String {
-    let token = base64::engine::general_purpose::STANDARD
-        .encode(format!("{}:{}", LCU_USERNAME, credentials.password));
-    format!("Basic {token}")
-}
-
 /// Loopback HTTPS REST client for the LCU.
+///
+/// The public surface is the closed set of calls the application makes; the generic
+/// `request`/`get` helpers are private and endpoints are allowlisted in `league::api`.
 pub struct LcuRestClient {
     credentials: LcuCredentials,
     /// TLS setup is fallible; a failure is surfaced on the first request rather than panicking.
@@ -171,13 +168,13 @@ impl LcuRestClient {
         self.request(&request).await.map(|_| ())
     }
 
-    pub async fn get(&self, endpoint: &str) -> Result<serde_json::Value, TransportError> {
+    async fn get(&self, endpoint: &str) -> Result<serde_json::Value, TransportError> {
         let request =
             LcuRequest::new(HttpMethod::Get, endpoint, None).map_err(TransportError::Request)?;
         self.request(&request).await
     }
 
-    pub async fn request(&self, request: &LcuRequest) -> Result<serde_json::Value, TransportError> {
+    async fn request(&self, request: &LcuRequest) -> Result<serde_json::Value, TransportError> {
         tokio::time::timeout(REQUEST_TIMEOUT, self.request_inner(request))
             .await
             .map_err(|_| TransportError::Timeout)?
@@ -208,7 +205,7 @@ impl LcuRestClient {
             request.method.as_str(),
             request.endpoint,
             self.credentials.port,
-            authorization(&self.credentials),
+            self.credentials.authorization(),
         );
         if let Some(body) = &request.body {
             head.push_str(&format!(
@@ -327,7 +324,7 @@ impl LcuEventSocket {
             "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\nAuthorization: {}\r\n\r\n",
             self.credentials.port,
             key,
-            authorization(&self.credentials),
+            self.credentials.authorization(),
         );
         tls.write_all(handshake.as_bytes())
             .await

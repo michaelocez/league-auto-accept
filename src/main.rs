@@ -20,6 +20,7 @@ use gpui::{
 use league_auto_accept::app::events::{AppEvent, EventOutcome};
 use league_auto_accept::app::service::spawn_league_service;
 use league_auto_accept::config::store::{default_settings_directory, SettingsStore};
+use league_auto_accept::notifications::discord::WebhookSecret;
 use league_auto_accept::platform::tray::TrayCommand;
 use league_auto_accept::platform::{single_instance, tray, window as platform_window};
 use league_auto_accept::ui::dashboard::Dashboard;
@@ -36,9 +37,13 @@ fn main() {
         return;
     };
 
-    // Typed settings service (own persistence format; encrypted webhook secret).
-    let store = Rc::new(RefCell::new(SettingsStore::with_directory(
+    // Typed settings service (own persistence format; encrypted webhook secret). The secret handle
+    // is written only by the store and read only by the notification sender; application state and
+    // the rendered UI carry just a non-secret configured/not-configured status.
+    let webhook = Arc::new(RwLock::new(WebhookSecret::default()));
+    let store = Rc::new(RefCell::new(SettingsStore::with_directory_and_webhook(
         &default_settings_directory(),
+        webhook.clone(),
     )));
     let settings = store.borrow_mut().load().unwrap_or_else(|error| {
         log::error!("failed to load settings, using defaults: {error}");
@@ -59,6 +64,7 @@ fn main() {
     let background = spawn_league_service(
         tx.clone(),
         settings_shared.clone(),
+        webhook.clone(),
         settings.auto_accept_enabled,
     );
     let enabled_flag = background.enabled_flag.clone();
@@ -107,15 +113,12 @@ fn main() {
                     if let Some(hwnd) = platform_window::raw_hwnd(window) {
                         hwnd_slot.store(hwnd as isize, Ordering::SeqCst);
                     }
-                    let webhook_value = settings.discord_webhook_url.clone();
+                    // Starts empty: the saved webhook is never decrypted into the UI. The row shows
+                    // only whether one is configured; typing here sets a new one.
                     let webhook_input = cx.new(|cx| {
-                        let mut state = gpui::base::input::InputState::new(window, cx)
+                        gpui::base::input::InputState::new(window, cx)
                             .placeholder("https://discord.com/api/webhooks/…")
-                            .masked(true);
-                        if !webhook_value.is_empty() {
-                            state.set_value(webhook_value.clone(), window, cx);
-                        }
-                        state
+                            .masked(true)
                     });
                     let view = cx.new(|cx| {
                         Dashboard::new(
