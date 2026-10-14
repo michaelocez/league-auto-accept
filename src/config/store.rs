@@ -235,20 +235,213 @@ impl SettingsStore {
             std::fs::create_dir_all(parent)?;
         }
         let temporary = self.path.with_extension("json.tmp");
-        std::fs::write(&temporary, text)?;
-        if let Err(error) = std::fs::rename(&temporary, &self.path) {
-            // A refused atomic replace must not leave a stale temporary file behind.
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error.into());
+        if let Err(error) = std::fs::write(&temporary, &text) {
+            // The refusal can happen here, before the replacement is ever attempted, in which case
+            // nothing below this point runs — so it is recorded and reported from here.
+            record_write_failure(&self.path, &error);
+            let step =
+                contextual_io_error("writing the temporary settings file", &temporary, &error);
+            return Err(step.into());
         }
-        Ok(())
+
+        // A momentary lock — a scanner reading the file, another handle not yet closed — is worth
+        // waiting out, because the alternative is a setting the user watched disappear.
+        let mut refusal = None;
+        for _ in 0..REPLACE_ATTEMPTS {
+            match std::fs::rename(&temporary, &self.path) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    refusal = Some(error);
+                    std::thread::sleep(REPLACE_RETRY_DELAY);
+                }
+            }
+        }
+        let refusal = refusal.unwrap_or_else(|| std::io::Error::other("not replaced"));
+
+        // Being able to open the file itself proves the refusal was about *replacing* it (something
+        // holds it without delete sharing) rather than about writing to it, so the same text is
+        // written in place. A copy is kept first: an interrupted in-place write is not atomic.
+        if settings_file_accepts_a_write(&self.path) {
+            let backup = self.path.with_extension("json.bak");
+            if std::fs::copy(&self.path, &backup).is_ok()
+                && std::fs::write(&self.path, &text).is_ok()
+            {
+                let _ = std::fs::remove_file(&temporary);
+                return Ok(());
+            }
+        }
+
+        // A refused replace must not leave a stale temporary file behind.
+        let _ = std::fs::remove_file(&temporary);
+        record_write_failure(&self.path, &refusal);
+        let step = contextual_io_error("replacing the settings file", &self.path, &refusal);
+        Err(step.into())
+    }
+}
+
+/// How many times the atomic replacement is retried before the write is called refused. Short,
+/// because the save runs on the UI thread.
+const REPLACE_ATTEMPTS: u32 = 3;
+/// The pause between those attempts.
+const REPLACE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+/// The file a refused save records its reason in.
+const WRITE_ERROR_LOG: &str = "settings-error.log";
+
+/// True when the settings file itself accepts a write, which separates "this file cannot be
+/// replaced" from "this file cannot be written at all".
+fn settings_file_accepts_a_write(path: &Path) -> bool {
+    std::fs::OpenOptions::new().write(true).open(path).is_ok()
+}
+
+/// Records why a save was refused, beside the settings file.
+///
+/// A refusal is nearly always specific to the machine rather than to the app — a security product, a
+/// handle held by another program, a restricted token — and a one-line banner cannot tell those
+/// apart, so the facts are written down where they can be read afterwards.
+fn record_write_failure(path: &Path, error: &std::io::Error) {
+    use std::io::Write as _;
+
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+
+    // A file that can be created in the directory but does not accept a write is the shape of a lock
+    // or a scanner; one that cannot be created at all points at the directory or the process.
+    let probe_path = directory.join("settings-write-probe.tmp");
+    let can_create_in_directory = std::fs::write(&probe_path, b"probe").is_ok();
+    let _ = std::fs::remove_file(&probe_path);
+    let can_write_in_place = settings_file_accepts_a_write(path);
+    let existing = std::fs::metadata(path)
+        .map(|metadata| {
+            format!(
+                "{} bytes, readonly={}",
+                metadata.len(),
+                metadata.permissions().readonly()
+            )
+        })
+        .unwrap_or_else(|failure| format!("unreadable ({failure})"));
+
+    let integrity = process_integrity_level()
+        .map(|level| format!("{level:#x}"))
+        .unwrap_or_else(|| "unknown".into());
+    let line = format!(
+        "settings save refused: {error} | path={} | integrity={integrity} | can create file in directory={can_create_in_directory} | can open existing file for write={can_write_in_place} | {existing}",
+        path.display()
+    );
+    log::error!("{line}");
+
+    // When the settings directory is the thing being refused, a log written there cannot exist —
+    // which is precisely the case worth recording — so the app's own directory and the temporary
+    // directory are tried as well. An unwritable `AppData` is exactly when this matters.
+    let beside_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.join(WRITE_ERROR_LOG)))
+        .unwrap_or_default();
+    let candidates = [
+        directory.join(WRITE_ERROR_LOG),
+        beside_exe,
+        std::env::temp_dir().join("league-auto-accept-settings-error.log"),
+    ];
+    for candidate in candidates {
+        if candidate.as_os_str().is_empty() {
+            continue;
+        }
+        let opened = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&candidate);
+        if opened
+            .map(|mut log| writeln!(log, "{line}").is_ok())
+            .unwrap_or(false)
+        {
+            return;
+        }
+    }
+}
+
+/// Names the step that failed, so the banner says more than "Access is denied".
+fn contextual_io_error(step: &str, path: &Path, error: &std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!("{step} ({}) failed: {error}", path.display()),
+    )
+}
+
+/// The integrity level of this process, as the last sub-authority of its integrity SID.
+///
+/// `0x1000` is low, `0x2000` is the level normal user programs run at.
+fn process_integrity_level() -> Option<u32> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // Word-aligned because the label starts with pointers, and far larger than a label plus a SID.
+    let mut buffer = [0u64; 32];
+    let mut needed = 0u32;
+    let mut token = std::ptr::null_mut();
+
+    // SAFETY: the token handle is closed on every path that opened it, and the API is given a buffer
+    // that is large enough for the label it writes, correctly aligned for the pointers inside it.
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let ok = GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            buffer.as_mut_ptr().cast(),
+            std::mem::size_of_val(&buffer) as u32,
+            &mut needed,
+        );
+        let level = if ok == 0 {
+            None
+        } else {
+            let label = &*(buffer.as_ptr().cast::<TOKEN_MANDATORY_LABEL>());
+            let count = GetSidSubAuthorityCount(label.Label.Sid);
+            if count.is_null() {
+                None
+            } else {
+                let last = GetSidSubAuthority(label.Label.Sid, *count as u32 - 1);
+                if last.is_null() {
+                    None
+                } else {
+                    Some(*last)
+                }
+            }
+        };
+        CloseHandle(token);
+        level
+    }
+}
+
+/// A sentence naming a lowered integrity level, which is a cause of a refused write that a log file
+/// may itself be unable to record.
+///
+/// A process started by a sandboxed or otherwise lowered parent inherits that level, and so does one
+/// started from an executable that carries a low-integrity label — which is what happens when an
+/// executable is built inside a sandboxed folder. Windows then refuses every write the user could
+/// normally make — anywhere, not just to the settings — while still letting the process read and run,
+/// so the banner is the reliable place to say it.
+fn restricted_launch_note() -> Option<&'static str> {
+    match process_integrity_level() {
+        Some(level) if level < 0x2000 => Some(
+            " This process is also running at a lower integrity level than your normal programs, so \
+             Windows refuses these writes everywhere in your profile: either it was started by \
+             something that hands out restricted rights, or the executable itself inherited a \
+             low-integrity label from the folder it was built in. Copy the executable into an \
+             ordinary folder, or rebuild it in one, and start it normally.",
+        ),
+        _ => None,
     }
 }
 
 /// The user-facing explanation when settings could not be written.
 pub fn save_error_message(path: &Path, error: &StoreError) -> String {
+    let note = restricted_launch_note().unwrap_or("");
     format!(
-        "Settings could not be saved to {} — {error}. Your changes apply until the app closes.",
+        "Settings could not be saved to {} — {error}. Your changes apply until the app closes, and \
+         it tried to record why in settings-error.log: beside the settings file, or beside the app.{note}",
         path.display()
     )
 }
@@ -306,6 +499,48 @@ mod tests {
                 .trim_start_matches("protected:")
                 .to_string()
         }
+    }
+
+    #[test]
+    fn a_refused_replace_is_reported_and_leaves_no_temporary_behind() {
+        let root = tempdir().unwrap();
+        // A directory where the settings file belongs cannot be replaced by a file.
+        std::fs::create_dir(root.path().join(SETTINGS_FILE_NAME)).unwrap();
+        let store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+
+        let error = store.save().expect_err("the replacement cannot succeed");
+
+        assert!(matches!(error, StoreError::Io(_)));
+        assert!(!root.path().join("settings.json.tmp").exists());
+        assert!(!root.path().join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn a_refused_replace_records_what_was_attempted() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir(root.path().join(SETTINGS_FILE_NAME)).unwrap();
+        let store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+
+        let _ = store.save().expect_err("the replacement cannot succeed");
+
+        let log = std::fs::read_to_string(root.path().join("settings-error.log")).unwrap();
+        assert!(log.contains("settings save refused"));
+        assert!(log.contains("path="));
+        assert!(log.contains("can create file in directory=true"));
+        assert!(log.contains("can open existing file for write=false"));
+        assert!(!root.path().join("settings-write-probe.tmp").exists());
+    }
+
+    #[test]
+    fn the_process_runs_at_a_plausible_integrity_level() {
+        // Exercises the token query behind the banner's restricted-launch note. A plausible level —
+        // low through system — means the integrity SID was read correctly rather than through a
+        // stale pointer, which is the failure this check exists to rule out.
+        let level = process_integrity_level().expect("the process token has an integrity level");
+        assert!(
+            (0x1000..=0x4000).contains(&level),
+            "implausible integrity level {level:#x}"
+        );
     }
 
     #[test]
