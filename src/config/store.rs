@@ -415,19 +415,22 @@ fn process_integrity_level() -> Option<u32> {
     }
 }
 
-/// A sentence naming a restricted launch, which is the one cause of a refused write that cannot be
-/// recorded in a log file.
+/// A sentence naming a lowered integrity level, which is a cause of a refused write that a log file
+/// may itself be unable to record.
 ///
-/// A process started by a sandboxed or otherwise lowered parent inherits that level, and Windows then
-/// refuses every write the user could normally make — anywhere, not just to the settings — while
-/// still letting the process read and run. When that is the reason, saying so in the banner is the
-/// only way the user can find out, because a log cannot be written in that state.
+/// A process started by a sandboxed or otherwise lowered parent inherits that level, and so does one
+/// started from an executable that carries a low-integrity label — which is what happens when an
+/// executable is built inside a sandboxed folder. Windows then refuses every write the user could
+/// normally make — anywhere, not just to the settings — while still letting the process read and run,
+/// so the banner is the reliable place to say it.
 fn restricted_launch_note() -> Option<&'static str> {
     match process_integrity_level() {
         Some(level) if level < 0x2000 => Some(
             " This process is also running at a lower integrity level than your normal programs, so \
-             Windows refuses these writes everywhere in your profile: start the app by double-clicking \
-             its executable, rather than from a tool that launches it for you.",
+             Windows refuses these writes everywhere in your profile: either it was started by \
+             something that hands out restricted rights, or the executable itself inherited a \
+             low-integrity label from the folder it was built in. Copy the executable into an \
+             ordinary folder, or rebuild it in one, and start it normally.",
         ),
         _ => None,
     }
