@@ -235,20 +235,99 @@ impl SettingsStore {
             std::fs::create_dir_all(parent)?;
         }
         let temporary = self.path.with_extension("json.tmp");
-        std::fs::write(&temporary, text)?;
-        if let Err(error) = std::fs::rename(&temporary, &self.path) {
-            // A refused atomic replace must not leave a stale temporary file behind.
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error.into());
+        std::fs::write(&temporary, &text)?;
+
+        // A momentary lock — a scanner reading the file, another handle not yet closed — is worth
+        // waiting out, because the alternative is a setting the user watched disappear.
+        let mut refusal = None;
+        for _ in 0..REPLACE_ATTEMPTS {
+            match std::fs::rename(&temporary, &self.path) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    refusal = Some(error);
+                    std::thread::sleep(REPLACE_RETRY_DELAY);
+                }
+            }
         }
-        Ok(())
+        let refusal = refusal.unwrap_or_else(|| std::io::Error::other("not replaced"));
+
+        // Being able to open the file itself proves the refusal was about *replacing* it (something
+        // holds it without delete sharing) rather than about writing to it, so the same text is
+        // written in place. A copy is kept first: an interrupted in-place write is not atomic.
+        if settings_file_accepts_a_write(&self.path) {
+            let backup = self.path.with_extension("json.bak");
+            if std::fs::copy(&self.path, &backup).is_ok()
+                && std::fs::write(&self.path, &text).is_ok()
+            {
+                let _ = std::fs::remove_file(&temporary);
+                return Ok(());
+            }
+        }
+
+        // A refused replace must not leave a stale temporary file behind.
+        let _ = std::fs::remove_file(&temporary);
+        record_write_failure(&self.path, &refusal);
+        Err(refusal.into())
+    }
+}
+
+/// How many times the atomic replacement is retried before the write is called refused. Short,
+/// because the save runs on the UI thread.
+const REPLACE_ATTEMPTS: u32 = 3;
+/// The pause between those attempts.
+const REPLACE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// True when the settings file itself accepts a write, which separates "this file cannot be
+/// replaced" from "this file cannot be written at all".
+fn settings_file_accepts_a_write(path: &Path) -> bool {
+    std::fs::OpenOptions::new().write(true).open(path).is_ok()
+}
+
+/// Records why a save was refused, beside the settings file.
+///
+/// A refusal is nearly always specific to the machine rather than to the app — a security product, a
+/// handle held by another program, a restricted token — and a one-line banner cannot tell those
+/// apart, so the facts are written down where they can be read afterwards.
+fn record_write_failure(path: &Path, error: &std::io::Error) {
+    use std::io::Write as _;
+
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+
+    // A file that can be created in the directory but does not accept a write is the shape of a lock
+    // or a scanner; one that cannot be created at all points at the directory or the process.
+    let probe_path = directory.join("settings-write-probe.tmp");
+    let can_create_in_directory = std::fs::write(&probe_path, b"probe").is_ok();
+    let _ = std::fs::remove_file(&probe_path);
+    let can_write_in_place = settings_file_accepts_a_write(path);
+    let existing = std::fs::metadata(path)
+        .map(|metadata| {
+            format!(
+                "{} bytes, readonly={}",
+                metadata.len(),
+                metadata.permissions().readonly()
+            )
+        })
+        .unwrap_or_else(|failure| format!("unreadable ({failure})"));
+
+    let line = format!(
+        "settings save refused: {error} | path={} | can create file in directory={can_create_in_directory} | can open existing file for write={can_write_in_place} | {existing}",
+        path.display()
+    );
+    log::error!("{line}");
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("settings-error.log"))
+    {
+        let _ = writeln!(log, "{line}");
     }
 }
 
 /// The user-facing explanation when settings could not be written.
 pub fn save_error_message(path: &Path, error: &StoreError) -> String {
     format!(
-        "Settings could not be saved to {} — {error}. Your changes apply until the app closes.",
+        "Settings could not be saved to {} — {error}. Your changes apply until the app closes, and \
+         the reason was written to settings-error.log beside it.",
         path.display()
     )
 }
@@ -306,6 +385,36 @@ mod tests {
                 .trim_start_matches("protected:")
                 .to_string()
         }
+    }
+
+    #[test]
+    fn a_refused_replace_is_reported_and_leaves_no_temporary_behind() {
+        let root = tempdir().unwrap();
+        // A directory where the settings file belongs cannot be replaced by a file.
+        std::fs::create_dir(root.path().join(SETTINGS_FILE_NAME)).unwrap();
+        let store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+
+        let error = store.save().expect_err("the replacement cannot succeed");
+
+        assert!(matches!(error, StoreError::Io(_)));
+        assert!(!root.path().join("settings.json.tmp").exists());
+        assert!(!root.path().join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn a_refused_replace_records_what_was_attempted() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir(root.path().join(SETTINGS_FILE_NAME)).unwrap();
+        let store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+
+        let _ = store.save().expect_err("the replacement cannot succeed");
+
+        let log = std::fs::read_to_string(root.path().join("settings-error.log")).unwrap();
+        assert!(log.contains("settings save refused"));
+        assert!(log.contains("path="));
+        assert!(log.contains("can create file in directory=true"));
+        assert!(log.contains("can open existing file for write=false"));
+        assert!(!root.path().join("settings-write-probe.tmp").exists());
     }
 
     #[test]
