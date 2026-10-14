@@ -5,11 +5,15 @@
 //! `/lol-` path is reachable.
 
 /// Every LCU endpoint the application may call.
+///
+/// The paths are written out rather than taken from the `league` constants on purpose: widening the
+/// request surface then has to be a visible edit here *and* a failure in the test that pins these
+/// strings to those constants, instead of following a constant wherever it moves.
 pub const ALLOWED_LCU_ENDPOINTS: [&str; 4] = [
-    crate::league::SUMMONER_ENDPOINT,
-    crate::league::GAMEFLOW_ENDPOINT,
-    crate::league::READY_CHECK_ENDPOINT,
-    crate::league::READY_CHECK_ACCEPT_ENDPOINT,
+    "/lol-summoner/v1/current-summoner",
+    "/lol-gameflow/v1/gameflow-phase",
+    "/lol-matchmaking/v1/ready-check",
+    "/lol-matchmaking/v1/ready-check/accept",
 ];
 
 /// The only HTTP methods the application needs.
@@ -94,10 +98,30 @@ mod tests {
 
     #[test]
     fn allows_only_the_endpoints_the_application_uses() {
+        // Written out, so adding an endpoint here is a deliberate, reviewed change to this test too.
+        assert_eq!(
+            ALLOWED_LCU_ENDPOINTS,
+            [
+                "/lol-summoner/v1/current-summoner",
+                "/lol-gameflow/v1/gameflow-phase",
+                "/lol-matchmaking/v1/ready-check",
+                "/lol-matchmaking/v1/ready-check/accept",
+            ]
+        );
+        // …and pinned to the constants the crate actually calls, so a call site cannot drift onto an
+        // endpoint that is no longer in the allowlist.
+        assert_eq!(
+            ALLOWED_LCU_ENDPOINTS,
+            [
+                league::SUMMONER_ENDPOINT,
+                league::GAMEFLOW_ENDPOINT,
+                league::READY_CHECK_ENDPOINT,
+                league::READY_CHECK_ACCEPT_ENDPOINT,
+            ]
+        );
         for endpoint in ALLOWED_LCU_ENDPOINTS {
             assert!(is_allowed_lcu_endpoint(endpoint), "{endpoint:?}");
         }
-        assert_eq!(ALLOWED_LCU_ENDPOINTS.len(), 4);
     }
 
     #[test]
