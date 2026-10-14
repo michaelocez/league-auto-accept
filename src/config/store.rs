@@ -276,6 +276,8 @@ impl SettingsStore {
 const REPLACE_ATTEMPTS: u32 = 3;
 /// The pause between those attempts.
 const REPLACE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+/// The file a refused save records its reason in.
+const WRITE_ERROR_LOG: &str = "settings-error.log";
 
 /// True when the settings file itself accepts a write, which separates "this file cannot be
 /// replaced" from "this file cannot be written at all".
@@ -314,12 +316,33 @@ fn record_write_failure(path: &Path, error: &std::io::Error) {
         path.display()
     );
     log::error!("{line}");
-    if let Ok(mut log) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(directory.join("settings-error.log"))
-    {
-        let _ = writeln!(log, "{line}");
+
+    // When the settings directory is the thing being refused, a log written there cannot exist —
+    // which is precisely the case worth recording — so the app's own directory and the temporary
+    // directory are tried as well. An unwritable `AppData` is exactly when this matters.
+    let beside_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.join(WRITE_ERROR_LOG)))
+        .unwrap_or_default();
+    let candidates = [
+        directory.join(WRITE_ERROR_LOG),
+        beside_exe,
+        std::env::temp_dir().join("league-auto-accept-settings-error.log"),
+    ];
+    for candidate in candidates {
+        if candidate.as_os_str().is_empty() {
+            continue;
+        }
+        let opened = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&candidate);
+        if opened
+            .map(|mut log| writeln!(log, "{line}").is_ok())
+            .unwrap_or(false)
+        {
+            return;
+        }
     }
 }
 
@@ -327,7 +350,7 @@ fn record_write_failure(path: &Path, error: &std::io::Error) {
 pub fn save_error_message(path: &Path, error: &StoreError) -> String {
     format!(
         "Settings could not be saved to {} — {error}. Your changes apply until the app closes, and \
-         the reason was written to settings-error.log beside it.",
+         it tried to record why in settings-error.log: beside the settings file, or beside the app.",
         path.display()
     )
 }
