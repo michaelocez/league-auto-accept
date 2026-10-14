@@ -249,7 +249,12 @@ impl SettingsStore {
         let mut refusal = None;
         for _ in 0..REPLACE_ATTEMPTS {
             match std::fs::rename(&temporary, &self.path) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    // A backup written by an earlier in-place save is stale once the atomic
+                    // replacement works again, and nothing ever reads it back.
+                    let _ = std::fs::remove_file(self.path.with_extension("json.bak"));
+                    return Ok(());
+                }
                 Err(error) => {
                     refusal = Some(error);
                     std::thread::sleep(REPLACE_RETRY_DELAY);
@@ -286,11 +291,30 @@ const REPLACE_ATTEMPTS: u32 = 3;
 const REPLACE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
 /// The file a refused save records its reason in.
 const WRITE_ERROR_LOG: &str = "settings-error.log";
+/// The write-failure log is a diagnostic aid rather than a history: past this size the live file is
+/// rotated, so a refusal that persists cannot grow it without bound.
+const WRITE_ERROR_LOG_MAX_BYTES: u64 = 64 * 1024;
 
 /// True when the settings file itself accepts a write, which separates "this file cannot be
 /// replaced" from "this file cannot be written at all".
 fn settings_file_accepts_a_write(path: &Path) -> bool {
     std::fs::OpenOptions::new().write(true).open(path).is_ok()
+}
+
+/// Keeps the write-failure log bounded by rotating an oversized one before the next append.
+///
+/// Only refusals ever reach this log, so a file past the cap is old news: one rotation is kept as
+/// `settings-error.log.1`, replacing any earlier one, and the live file starts again from empty.
+fn rotate_diagnostics_log(path: &Path) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() <= WRITE_ERROR_LOG_MAX_BYTES {
+        return;
+    }
+    let previous = path.with_extension("log.1");
+    let _ = std::fs::remove_file(&previous);
+    let _ = std::fs::rename(path, &previous);
 }
 
 /// Records why a save was refused, beside the settings file.
@@ -344,6 +368,7 @@ fn record_write_failure(path: &Path, error: &std::io::Error) {
         if candidate.as_os_str().is_empty() {
             continue;
         }
+        rotate_diagnostics_log(&candidate);
         let opened = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -559,6 +584,65 @@ mod tests {
 
         let stored = std::fs::read_to_string(root.path().join("settings.json")).unwrap();
         assert!(stored.contains("\"protection\": \"os\""));
+    }
+
+    /// The write-failure log is a diagnostic aid, not a history: it must not grow without bound on a
+    /// machine where every save is refused.
+    #[test]
+    fn an_oversized_write_failure_log_is_rotated_instead_of_growing_without_bound() {
+        let root = tempdir().unwrap();
+        // The settings path is a directory, so the save cannot succeed and lands in the log.
+        std::fs::create_dir(root.path().join(SETTINGS_FILE_NAME)).unwrap();
+        let store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+
+        let log = root.path().join(WRITE_ERROR_LOG);
+        let old = vec![b'x'; WRITE_ERROR_LOG_MAX_BYTES as usize + 1];
+        std::fs::write(&log, &old).unwrap();
+
+        let _ = store.save().expect_err("a directory cannot be replaced");
+
+        let rotated = root.path().join("settings-error.log.1");
+        assert_eq!(
+            std::fs::read(&rotated).unwrap(),
+            old,
+            "the old log is kept as one rotation"
+        );
+        let live = std::fs::read_to_string(&log).unwrap();
+        assert!(live.contains("settings save refused"));
+        assert!(
+            live.len() < 4096,
+            "the live log restarts instead of growing"
+        );
+
+        // A refusal against a small live log appends rather than rotating again.
+        let _ = store.save();
+        assert_eq!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .matches("settings save refused")
+                .count(),
+            2
+        );
+    }
+
+    /// A backup is written only because the in-place write is not atomic, so it is not reused and
+    /// must not linger once replacement works again.
+    #[test]
+    fn a_successful_replacement_clears_a_backup_left_by_an_earlier_in_place_save() {
+        let root = tempdir().unwrap();
+        let mut store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+        store.load().unwrap();
+
+        let backup = root.path().join("settings.json.bak");
+        std::fs::write(&backup, "stale copy").unwrap();
+        store
+            .update(&json!({ "autoAcceptEnabled": true }))
+            .expect("the settings file can be written");
+
+        assert!(
+            !backup.exists(),
+            "the backup is not reused and does not outlive the successful replacement"
+        );
     }
 
     #[test]

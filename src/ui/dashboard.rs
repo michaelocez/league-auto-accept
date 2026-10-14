@@ -248,12 +248,17 @@ impl Dashboard {
     }
 
     pub fn apply_event(&mut self, event: AppEvent, cx: &mut Context<Self>) -> EventOutcome {
+        // A tray Quit and a window close are the same intent, and both have to write the pending
+        // template edit before the process goes away. Recognising the exit here rather than inside
+        // each branch is what makes a close safe to route through the application.
+        if event.requests_exit() {
+            self.flush_settings_write(cx);
+            return EventOutcome::Quit;
+        }
         match event {
             AppEvent::Tray(TrayCommand::ShowWindow) => return EventOutcome::ShowWindow,
-            AppEvent::Tray(TrayCommand::Quit) => {
-                self.flush_settings_write(cx);
-                return EventOutcome::Quit;
-            }
+            // Both are handled above, so the flush cannot drift apart from the exit.
+            AppEvent::Tray(TrayCommand::Quit) | AppEvent::CloseRequested => {}
             // Handled by the shell (opens the tray popup window); nothing to apply here.
             AppEvent::Tray(TrayCommand::OpenPopup) => {}
             AppEvent::Tray(TrayCommand::ToggleAutoAccept) => {
