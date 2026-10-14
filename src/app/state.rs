@@ -114,9 +114,7 @@ impl AppState {
             ServiceEvent::Lifecycle(lifecycle) => {
                 let (label, kind) = match lifecycle {
                     Lifecycle::QueuePopped => ("Match found", ActivityKind::Info),
-                    Lifecycle::AutoAccepted => {
-                        ("Ready check auto-accepted", ActivityKind::Accepted)
-                    }
+                    Lifecycle::AutoAccepted => ("Match accepted", ActivityKind::Accepted),
                     Lifecycle::GameStarted => ("Game started", ActivityKind::Info),
                 };
                 self.push_activity(label, kind);

@@ -24,9 +24,11 @@ impl Row {
         }
     }
 
-    /// Explanatory text under the label.
+    /// Explanatory text under the label. An empty description is ignored, so a caller can pass one
+    /// through without a condition.
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
-        self.description = Some(description.into());
+        let description = description.into();
+        self.description = (!description.is_empty()).then_some(description);
         self
     }
 

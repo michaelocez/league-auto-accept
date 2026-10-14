@@ -688,15 +688,15 @@ impl Dashboard {
             .child(Self::toggle_row(
                 "toggle-queue-popped",
                 "Match found",
-                "Sent when a match is found and the ready check appears.",
+                "",
                 events.queue_popped,
                 ToggleSetting::QueuePopped,
                 cx,
             ))
             .child(Self::toggle_row(
                 "toggle-auto-accepted",
-                "Ready check accepted",
-                "Sent when a ready check is accepted automatically.",
+                "Match accepted",
+                "",
                 events.auto_accepted,
                 ToggleSetting::AutoAccepted,
                 cx,
@@ -704,7 +704,7 @@ impl Dashboard {
             .child(Self::toggle_row(
                 "toggle-game-started",
                 "Game started",
-                "Sent when the game begins.",
+                "",
                 events.game_started,
                 ToggleSetting::GameStarted,
                 cx,
@@ -715,13 +715,15 @@ impl Dashboard {
             .title("Messages")
             .child(
                 div()
+                    .px(theme::space_4())
+                    .pb(theme::space_3())
                     .text_size(theme::text_caption())
                     .text_color(t.text_muted)
                     .child("Use {mentions} where the mentioned people should appear."),
             )
             .child(self.message_row("Match found", &self.templates.queue_popped, &mentions, cx))
             .child(self.message_row(
-                "Ready check accepted",
+                "Match accepted",
                 &self.templates.auto_accepted,
                 &mentions,
                 cx,
