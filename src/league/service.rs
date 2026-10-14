@@ -6,6 +6,7 @@
 //! Behaviour: 3-second discovery/reconnect polling, credential-change detection, one accept
 //! request at a time, bounded retry, cancellation, and generation-guarded staleness.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -137,18 +138,33 @@ impl LeagueService {
     }
 
     async fn run_once(&mut self) {
-        let Some(credentials) = self.locator.find_running_client() else {
-            self.disconnect();
-            return;
-        };
-
-        self.emit(ServiceEvent::Connection { connected: false });
-
-        let rest = Arc::new(LcuRestClient::new(credentials.clone()));
-        if rest.verify().await.is_err() {
+        let candidates = self.locator.find_running_clients();
+        if candidates.is_empty() {
             self.disconnect();
             return;
         }
+
+        self.emit(ServiceEvent::Connection { connected: false });
+
+        // Every installation with a parseable lockfile gets a turn: one can be listed while its
+        // client is gone or unresponsive, and that must not stop the service reaching a client
+        // that is really there.
+        let mut live = None;
+        for credentials in candidates {
+            let rest = Arc::new(LcuRestClient::new(credentials.clone()));
+            if rest.verify().await.is_ok() {
+                live = Some((credentials, rest));
+                break;
+            }
+            log::debug!(
+                "LCU at {} did not respond; trying the next installation",
+                credentials.install_path.display()
+            );
+        }
+        let Some((credentials, rest)) = live else {
+            self.disconnect();
+            return;
+        };
 
         let mut socket = match LcuEventSocket::new(credentials.clone()).connect().await {
             Ok(socket) => socket,
@@ -211,6 +227,13 @@ impl LeagueService {
                     let effects = self.session.sync_enabled();
                     self.handle_effects(effects, Some(&rest), Some(&input_tx));
                     match self.locator.find_running_client() {
+                        // League rewrites its lockfile in place, so a read can land mid-write and
+                        // parse as nothing while the client is still running. Only an absent
+                        // lockfile means this connection is really over; a closed socket says so
+                        // too, and the keepalive bounds how long a wedged one can hide that.
+                        None if !lockfile_is_gone(&credentials.install_path) => {
+                            log::debug!("lockfile unreadable but present; keeping the connection");
+                        }
                         None => {
                             self.emit(ServiceEvent::Connection { connected: false });
                             break;
@@ -335,9 +358,37 @@ fn parse_text_event(text: &str) -> Option<LcuEvent> {
     parse_lcu_event(&value)
 }
 
+/// Whether a failed discovery read means a connection's client is gone.
+///
+/// A lockfile that exists but does not parse is a read that landed while League was rewriting it;
+/// only a missing lockfile means the client this connection belongs to has exited.
+fn lockfile_is_gone(install_path: &Path) -> bool {
+    !install_path.join("lockfile").exists()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lockfile_that_is_present_but_unreadable_keeps_the_connection() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("League of Legends");
+        std::fs::create_dir_all(&install).unwrap();
+
+        assert!(
+            lockfile_is_gone(&install),
+            "an absent lockfile means the client exited"
+        );
+
+        // Mid-rewrite: the file is there, so the client is still running even though a read that
+        // lands now would parse as nothing.
+        std::fs::write(install.join("lockfile"), "LeagueClientUx:1234").unwrap();
+        assert!(!lockfile_is_gone(&install));
+
+        std::fs::remove_file(install.join("lockfile")).unwrap();
+        assert!(lockfile_is_gone(&install));
+    }
 
     fn session(enabled: bool) -> (MachineSession, Arc<AtomicBool>) {
         let flag = Arc::new(AtomicBool::new(enabled));
