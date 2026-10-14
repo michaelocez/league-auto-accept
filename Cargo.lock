@@ -3537,7 +3537,6 @@ dependencies = [
  "gpui-kit",
  "image",
  "log",
- "muda",
  "rand 0.9.5",
  "raw-window-handle",
  "rcgen",
