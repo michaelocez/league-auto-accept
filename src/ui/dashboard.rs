@@ -586,7 +586,7 @@ impl Dashboard {
                     .flex_col()
                     .gap(theme::space_2())
                     .max_w(px(440.0))
-                    .child(Input::new(&self.webhook))
+                    .child(Self::input_frame(&self.webhook, cx))
                     .child(
                         div()
                             .flex()
@@ -674,7 +674,7 @@ impl Dashboard {
             .child(Self::toggle_row(
                 "toggle-discord",
                 "Enable Discord notifications",
-                "Queue popped, auto-accepted and game-started alerts.",
+                "Match-found, auto-accepted and game-started alerts.",
                 discord_enabled,
                 ToggleSetting::DiscordNotifications,
                 cx,
@@ -687,16 +687,16 @@ impl Dashboard {
             .title("Events")
             .child(Self::toggle_row(
                 "toggle-queue-popped",
-                "Queue popped",
-                "Sent when your queue pops.",
+                "Match found",
+                "",
                 events.queue_popped,
                 ToggleSetting::QueuePopped,
                 cx,
             ))
             .child(Self::toggle_row(
                 "toggle-auto-accepted",
-                "Ready check accepted",
-                "Sent when a ready check is accepted automatically.",
+                "Match accepted",
+                "",
                 events.auto_accepted,
                 ToggleSetting::AutoAccepted,
                 cx,
@@ -704,7 +704,7 @@ impl Dashboard {
             .child(Self::toggle_row(
                 "toggle-game-started",
                 "Game started",
-                "Sent when the game begins.",
+                "",
                 events.game_started,
                 ToggleSetting::GameStarted,
                 cx,
@@ -713,9 +713,17 @@ impl Dashboard {
         let mentions = self.state.settings.discord_mentions.clone();
         let message_group = SettingsGroup::new()
             .title("Messages")
-            .child(self.message_row("Queue popped", &self.templates.queue_popped, &mentions, cx))
+            .child(
+                div()
+                    .px(theme::space_4())
+                    .pb(theme::space_3())
+                    .text_size(theme::text_caption())
+                    .text_color(t.text_muted)
+                    .child("Use {mentions} where the mentioned people should appear."),
+            )
+            .child(self.message_row("Match found", &self.templates.queue_popped, &mentions, cx))
             .child(self.message_row(
-                "Ready check accepted",
+                "Match accepted",
                 &self.templates.auto_accepted,
                 &mentions,
                 cx,
@@ -732,8 +740,22 @@ impl Dashboard {
             .into_any_element()
     }
 
-    /// A message template with a live preview of exactly what would be sent for it, rendered
-    /// locally with the saved mentions (no network).
+    /// Wraps a text input so it reads as an editable field. The input widget paints no frame of its
+    /// own, so the recessed background and hairline border are what mark it as a place to type.
+    fn input_frame(state: &Entity<InputState>, cx: &gpui::App) -> impl IntoElement {
+        let t = Theme::of(cx);
+        div()
+            .bg(t.bg)
+            .border_1()
+            .border_color(t.border)
+            .rounded(theme::radius_md())
+            .px(theme::space_3())
+            .py(theme::space_2())
+            .child(Input::new(state))
+    }
+
+    /// A message template. The text is validated as it will be sent — with `{mentions}` expanded
+    /// and the saved mentions substituted — so what is checked is the message Discord receives.
     fn message_row(
         &self,
         label: &'static str,
@@ -742,42 +764,23 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> Row {
         let t = Theme::of(cx);
-        let text = template.read(cx).value().to_string();
-        let rendered = preview_notification(&text, mentions);
+        let rendered = preview_notification(&template.read(cx).value(), mentions);
         let error = content_error(&rendered);
-        let preview = if rendered.is_empty() {
-            "…".to_string()
-        } else {
-            rendered
-        };
 
         Row::new(label)
-            .description("Use {mentions} where the mentioned people should appear.")
-            .child(div().max_w(px(440.0)).child(Input::new(template)))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(theme::space_1())
-                    .child(
-                        div()
-                            .px(theme::space_3())
-                            .py(theme::space_2())
-                            .bg(t.surface_hover)
-                            .rounded(theme::radius_md())
-                            .text_size(theme::text_small())
-                            .text_color(t.text_muted)
-                            .child(preview),
-                    )
-                    .when_some(error, |this, message| {
-                        this.child(
-                            div()
-                                .text_size(theme::text_caption())
-                                .text_color(t.danger)
-                                .child(message),
-                        )
-                    }),
+                    .max_w(px(440.0))
+                    .child(Self::input_frame(template, cx)),
             )
+            .when_some(error, |this, message| {
+                this.child(
+                    div()
+                        .text_size(theme::text_caption())
+                        .text_color(t.danger)
+                        .child(message),
+                )
+            })
     }
 
     fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1088,13 +1091,13 @@ impl Dashboard {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(Input::new(&self.mention_nickname)),
+                    .child(Self::input_frame(&self.mention_nickname, cx)),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(Input::new(&self.mention_id)),
+                    .child(Self::input_frame(&self.mention_id, cx)),
             )
             .child(
                 Button::new("add-mention", "Add")
