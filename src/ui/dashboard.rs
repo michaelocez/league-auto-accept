@@ -23,7 +23,7 @@ use crate::app::state::{ActivityKind, AppState};
 use crate::config::settings::{
     is_valid_discord_id, AppSettings, BackdropMode, DiscordMention, ThemeMode, MAX_DISCORD_USER_IDS,
 };
-use crate::config::store::{save_error_message, SettingsStore};
+use crate::config::store::{save_error_message, webhook_error_message, SettingsStore};
 use crate::notifications::discord::{
     content_error, parse_discord_webhook_url, preview_notification,
 };
@@ -281,12 +281,17 @@ impl Dashboard {
 
     /// Stores the typed webhook through the store's validating setter. The view never reads the
     /// stored value back — only the non-secret status changes.
+    ///
+    /// A refused save leaves the previously stored webhook in place (the store writes before it
+    /// adopts), so the status shown stays the one that is really in use, the typed value is kept so
+    /// it can be retried, and the failure is reported in the same banner as other settings failures.
     fn save_webhook(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let outcome = self.store.borrow_mut().set_webhook(&self.webhook_draft);
         match outcome {
             Ok(()) => {
                 self.state.webhook_status = self.store.borrow().webhook_status();
                 self.state.webhook_test = None;
+                self.state.settings_error = None;
                 self.webhook_draft.clear();
                 let input = self.webhook.clone();
                 input.update(cx, |state, cx| {
@@ -294,7 +299,9 @@ impl Dashboard {
                 });
             }
             Err(error) => {
+                self.state.webhook_status = self.store.borrow().webhook_status();
                 log::error!("failed to save the Discord webhook: {error}");
+                self.state.settings_error = Some(webhook_error_message("saved", &error));
             }
         }
         cx.notify();
@@ -306,8 +313,13 @@ impl Dashboard {
             Ok(()) => {
                 self.state.webhook_status = self.store.borrow().webhook_status();
                 self.state.webhook_test = None;
+                self.state.settings_error = None;
             }
-            Err(error) => log::error!("failed to clear the Discord webhook: {error}"),
+            Err(error) => {
+                self.state.webhook_status = self.store.borrow().webhook_status();
+                log::error!("failed to clear the Discord webhook: {error}");
+                self.state.settings_error = Some(webhook_error_message("removed", &error));
+            }
         }
         cx.notify();
     }

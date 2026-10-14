@@ -171,19 +171,29 @@ impl SettingsStore {
 
     /// Replaces the Discord webhook. The only path by which a webhook enters the store, so the URL
     /// is validated here rather than trusted from the UI.
+    ///
+    /// The file is written before the shared handle changes, so a refused save leaves the
+    /// notification sender and the UI on the secret that is actually stored instead of on one that
+    /// exists only in memory and disappears at the next launch.
     pub fn set_webhook(&mut self, url: &str) -> Result<(), StoreError> {
         let url = url.trim();
         if !url.is_empty() && parse_discord_webhook_url(url).is_none() {
             return Err(StoreError::InvalidWebhook);
         }
-        self.replace_webhook(WebhookSecret::new(url));
-        self.save()
+        self.commit_webhook(WebhookSecret::new(url))
     }
 
-    /// Removes the stored Discord webhook.
+    /// Removes the stored Discord webhook, under the same write-first rule as
+    /// [`SettingsStore::set_webhook`].
     pub fn clear_webhook(&mut self) -> Result<(), StoreError> {
-        self.replace_webhook(WebhookSecret::default());
-        self.save()
+        self.commit_webhook(WebhookSecret::default())
+    }
+
+    /// Persists `secret` and adopts it only once the file has accepted it.
+    fn commit_webhook(&mut self, secret: WebhookSecret) -> Result<(), StoreError> {
+        self.save_with(&secret)?;
+        self.replace_webhook(secret);
+        Ok(())
     }
 
     /// Secret-free webhook status, suitable for application state and the UI.
@@ -224,10 +234,18 @@ impl SettingsStore {
     }
 
     fn save(&self) -> Result<(), StoreError> {
+        self.save_with(&self.read_webhook())
+    }
+
+    /// Writes the settings with `secret` as the stored webhook, without adopting it in memory.
+    ///
+    /// Making the secret a parameter is what lets a webhook change be written first and applied
+    /// second: `save` passes the secret already in the handle, and the setters pass the candidate.
+    fn save_with(&self, secret: &WebhookSecret) -> Result<(), StoreError> {
         let mut stored = serde_json::to_value(&self.settings)?;
-        let secret = self.codec.encode(self.read_webhook().expose());
+        let encoded = self.codec.encode(secret.expose());
         if let Some(object) = stored.as_object_mut() {
-            object.insert("discordWebhookUrl".into(), serde_json::to_value(secret)?);
+            object.insert("discordWebhookUrl".into(), serde_json::to_value(encoded)?);
         }
         let text = format!("{}\n", serde_json::to_string_pretty(&stored)?);
 
@@ -443,6 +461,22 @@ pub fn save_error_message(path: &Path, error: &StoreError) -> String {
         "Settings could not be saved to {} — {error}. Your changes apply until the app closes, and \
          it tried to record why in settings-error.log: beside the settings file, or beside the app.{note}",
         path.display()
+    )
+}
+
+/// The user-facing explanation when a webhook change could not be saved.
+///
+/// `action` is how the attempt reads in a sentence ("saved", "removed"). The message must not imply
+/// that the change took effect: when a write is refused the store keeps the secret it already had.
+pub fn webhook_error_message(action: &str, error: &StoreError) -> String {
+    if matches!(error, StoreError::InvalidWebhook) {
+        return "That is not a valid Discord webhook URL, so the webhook was left as it was."
+            .to_string();
+    }
+    let note = restricted_launch_note().unwrap_or("");
+    format!(
+        "The Discord webhook could not be {action} — {error}. The webhook already stored is still \
+         the one in use, and the app tried to record why in settings-error.log.{note}"
     )
 }
 
@@ -785,5 +819,95 @@ mod tests {
             .unwrap();
         assert!(reloaded.auto_accept_enabled);
         assert_eq!(reloaded.theme_mode, ThemeMode::Light);
+    }
+
+    /// A refused webhook save must not be adopted: the sender and the UI have to stay on the secret
+    /// that is really stored, or the change appears to work and then vanishes at the next launch.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_webhook_save_keeps_the_stored_secret() {
+        let root = tempdir().unwrap();
+        let webhook = Arc::new(RwLock::new(WebhookSecret::default()));
+        let mut store =
+            SettingsStore::with_webhook(root.path(), Box::new(FakeCodec), webhook.clone());
+        store.load().unwrap();
+
+        let path = root.path().join(SETTINGS_FILE_NAME);
+        let original = std::fs::metadata(&path).unwrap().permissions();
+        let mut read_only = original.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(&path, read_only).unwrap();
+
+        let error = store
+            .set_webhook(SAMPLE_URL)
+            .expect_err("a read-only settings file cannot be replaced");
+        assert!(matches!(error, StoreError::Io(_)));
+        assert!(
+            !store.webhook_status().configured,
+            "the status must keep describing the stored webhook"
+        );
+        assert!(
+            !webhook.read().unwrap().is_configured(),
+            "the notification sender must keep the stored secret"
+        );
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("discord.com"));
+
+        std::fs::set_permissions(&path, original).unwrap();
+
+        // Once the file accepts a write again the change is persisted and adopted together.
+        store.set_webhook(SAMPLE_URL).unwrap();
+        assert!(store.webhook_status().configured);
+        assert!(webhook.read().unwrap().is_configured());
+    }
+
+    /// Removing a webhook is a write too, so the same rule applies in reverse.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_webhook_removal_keeps_the_stored_secret() {
+        let root = tempdir().unwrap();
+        let webhook = Arc::new(RwLock::new(WebhookSecret::default()));
+        let mut store =
+            SettingsStore::with_webhook(root.path(), Box::new(FakeCodec), webhook.clone());
+        store.load().unwrap();
+        store.set_webhook(SAMPLE_URL).unwrap();
+
+        let path = root.path().join(SETTINGS_FILE_NAME);
+        let original = std::fs::metadata(&path).unwrap().permissions();
+        let mut read_only = original.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(&path, read_only).unwrap();
+
+        let error = store
+            .clear_webhook()
+            .expect_err("a read-only settings file cannot be replaced");
+        assert!(matches!(error, StoreError::Io(_)));
+        assert!(
+            store.webhook_status().configured,
+            "a refused removal must leave the webhook in place"
+        );
+        assert!(webhook.read().unwrap().is_configured());
+
+        std::fs::set_permissions(&path, original).unwrap();
+        store.clear_webhook().unwrap();
+        assert!(!store.webhook_status().configured);
+        assert!(!webhook.read().unwrap().is_configured());
+    }
+
+    #[test]
+    fn the_webhook_error_message_promises_nothing_that_did_not_happen() {
+        let refused =
+            webhook_error_message("saved", &StoreError::Io(std::io::Error::other("denied")));
+        assert!(refused.contains("could not be saved"));
+        assert!(refused.contains("still the one in use"));
+        assert!(refused.contains("settings-error.log"));
+
+        let removed =
+            webhook_error_message("removed", &StoreError::Io(std::io::Error::other("denied")));
+        assert!(removed.contains("could not be removed"));
+
+        let invalid = webhook_error_message("saved", &StoreError::InvalidWebhook);
+        assert!(invalid.contains("not a valid Discord webhook URL"));
     }
 }
