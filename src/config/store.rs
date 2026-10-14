@@ -235,7 +235,14 @@ impl SettingsStore {
             std::fs::create_dir_all(parent)?;
         }
         let temporary = self.path.with_extension("json.tmp");
-        std::fs::write(&temporary, &text)?;
+        if let Err(error) = std::fs::write(&temporary, &text) {
+            // The refusal can happen here, before the replacement is ever attempted, in which case
+            // nothing below this point runs — so it is recorded and reported from here.
+            record_write_failure(&self.path, &error);
+            let step =
+                contextual_io_error("writing the temporary settings file", &temporary, &error);
+            return Err(step.into());
+        }
 
         // A momentary lock — a scanner reading the file, another handle not yet closed — is worth
         // waiting out, because the alternative is a setting the user watched disappear.
@@ -267,7 +274,8 @@ impl SettingsStore {
         // A refused replace must not leave a stale temporary file behind.
         let _ = std::fs::remove_file(&temporary);
         record_write_failure(&self.path, &refusal);
-        Err(refusal.into())
+        let step = contextual_io_error("replacing the settings file", &self.path, &refusal);
+        Err(step.into())
     }
 }
 
@@ -311,8 +319,11 @@ fn record_write_failure(path: &Path, error: &std::io::Error) {
         })
         .unwrap_or_else(|failure| format!("unreadable ({failure})"));
 
+    let integrity = process_integrity_level()
+        .map(|level| format!("{level:#x}"))
+        .unwrap_or_else(|| "unknown".into());
     let line = format!(
-        "settings save refused: {error} | path={} | can create file in directory={can_create_in_directory} | can open existing file for write={can_write_in_place} | {existing}",
+        "settings save refused: {error} | path={} | integrity={integrity} | can create file in directory={can_create_in_directory} | can open existing file for write={can_write_in_place} | {existing}",
         path.display()
     );
     log::error!("{line}");
@@ -346,11 +357,88 @@ fn record_write_failure(path: &Path, error: &std::io::Error) {
     }
 }
 
+/// Names the step that failed, so the banner says more than "Access is denied".
+fn contextual_io_error(step: &str, path: &Path, error: &std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!("{step} ({}) failed: {error}", path.display()),
+    )
+}
+
+/// The integrity level of this process, as the last sub-authority of its integrity SID.
+///
+/// `0x1000` is low, `0x2000` is the level normal user programs run at.
+fn process_integrity_level() -> Option<u32> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // Word-aligned because the label starts with pointers, and far larger than a label plus a SID.
+    let mut buffer = [0u64; 32];
+    let mut needed = 0u32;
+    let mut token = std::ptr::null_mut();
+
+    // SAFETY: the token handle is closed on every path that opened it, and the API is given a buffer
+    // that is large enough for the label it writes, correctly aligned for the pointers inside it.
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let ok = GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            buffer.as_mut_ptr().cast(),
+            std::mem::size_of_val(&buffer) as u32,
+            &mut needed,
+        );
+        let level = if ok == 0 {
+            None
+        } else {
+            let label = &*(buffer.as_ptr().cast::<TOKEN_MANDATORY_LABEL>());
+            let count = GetSidSubAuthorityCount(label.Label.Sid);
+            if count.is_null() {
+                None
+            } else {
+                let last = GetSidSubAuthority(label.Label.Sid, *count as u32 - 1);
+                if last.is_null() {
+                    None
+                } else {
+                    Some(*last)
+                }
+            }
+        };
+        CloseHandle(token);
+        level
+    }
+}
+
+/// A sentence naming a restricted launch, which is the one cause of a refused write that cannot be
+/// recorded in a log file.
+///
+/// A process started by a sandboxed or otherwise lowered parent inherits that level, and Windows then
+/// refuses every write the user could normally make — anywhere, not just to the settings — while
+/// still letting the process read and run. When that is the reason, saying so in the banner is the
+/// only way the user can find out, because a log cannot be written in that state.
+fn restricted_launch_note() -> Option<&'static str> {
+    match process_integrity_level() {
+        Some(level) if level < 0x2000 => Some(
+            " This process is also running at a lower integrity level than your normal programs, so \
+             Windows refuses these writes everywhere in your profile: start the app by double-clicking \
+             its executable, rather than from a tool that launches it for you.",
+        ),
+        _ => None,
+    }
+}
+
 /// The user-facing explanation when settings could not be written.
 pub fn save_error_message(path: &Path, error: &StoreError) -> String {
+    let note = restricted_launch_note().unwrap_or("");
     format!(
         "Settings could not be saved to {} — {error}. Your changes apply until the app closes, and \
-         it tried to record why in settings-error.log: beside the settings file, or beside the app.",
+         it tried to record why in settings-error.log: beside the settings file, or beside the app.{note}",
         path.display()
     )
 }
@@ -438,6 +526,18 @@ mod tests {
         assert!(log.contains("can create file in directory=true"));
         assert!(log.contains("can open existing file for write=false"));
         assert!(!root.path().join("settings-write-probe.tmp").exists());
+    }
+
+    #[test]
+    fn the_process_runs_at_a_plausible_integrity_level() {
+        // Exercises the token query behind the banner's restricted-launch note. A plausible level —
+        // low through system — means the integrity SID was read correctly rather than through a
+        // stale pointer, which is the failure this check exists to rule out.
+        let level = process_integrity_level().expect("the process token has an integrity level");
+        assert!(
+            (0x1000..=0x4000).contains(&level),
+            "implausible integrity level {level:#x}"
+        );
     }
 
     #[test]
