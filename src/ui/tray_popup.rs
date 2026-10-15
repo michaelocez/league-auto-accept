@@ -22,7 +22,6 @@ use crate::ui::theme::{self, Theme};
 pub struct TrayPopup {
     dashboard: Entity<Dashboard>,
     tx: Sender<AppEvent>,
-    #[allow(dead_code)]
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     subscriptions: Vec<Subscription>,

@@ -1,6 +1,6 @@
 [package]
 name = "league-auto-accept"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2021"
 rust-version = "1.80"
 description = "A focused Windows utility for League of Legends ready checks."
@@ -24,7 +24,6 @@ async-channel = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tray-icon = "0.25"
-muda = "0.20"
 raw-window-handle = "0.6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"

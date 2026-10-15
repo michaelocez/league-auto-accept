@@ -33,8 +33,11 @@ service or driver, no telemetry, and no remote content in the UI.
 
 It is **portable**: a single self-contained executable (statically linked C runtime, embedded
 icons), with **no installer and no setup**. It runs on a clean Windows machine with nothing
-pre-installed and leaves no install footprint — to remove it, delete the file. The only thing it
-creates is its own per-user settings file (see [Configuration](#configuration)).
+pre-installed and leaves no install footprint — to remove it, delete the file. What it creates is its
+own per-user settings file (see [Configuration](#configuration)) plus, only when a write is refused or
+a settings file cannot be read, a diagnostic beside it: `settings.json.invalid`, a transient
+`settings.json.bak` or `settings-write-probe.tmp`, and `settings-error.log` (past 64 KiB the live log
+is rotated to `settings-error.log.1`, and the new one starts empty).
 
 > The executable is unsigned, so Windows SmartScreen may warn on first run ("More info" →
 > "Run anyway"). Code signing is out of scope for now.
@@ -69,9 +72,11 @@ window shows only whether a webhook is configured and its host. Your theme and w
 stored here too, so they are restored on next launch.
 
 The app must be able to write that file. If the write is refused — the directory is read-only, or the
-app was started from a sandboxed/low-integrity context — the change still takes effect for the
-session and the Settings and Notifications pages show a banner naming the file and the error, so
-nothing fails silently. Run the app from an ordinary user session to persist changes.
+app was started from a sandboxed/low-integrity context — the Settings and Notifications pages show a
+banner naming the file and the error, so nothing fails silently. A refused **webhook** change is not
+applied at all: the webhook already stored stays in use, the field keeps what you typed so it can be
+retried, and the banner says so. Other changes still take effect for the session and are lost when
+the app exits. Run the app from an ordinary user session to persist changes.
 
 ## Requirements
 
@@ -120,8 +125,8 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Formatting and lints are enforced in CI on every pull request and on `main`; the release workflow
-runs the test suite and the portable build.
+Formatting, lints and the test suite are enforced in CI on every pull request and on `main`; the
+release workflow re-runs the suite in release mode and builds the portable executable.
 
 ## Architecture
 
@@ -147,6 +152,30 @@ channel, so the client being closed or restarted never blocks or crashes the app
   notification sender; it is absent from application state and redacted in `Debug` output.
 - Discord webhook URLs are validated; outbound requests are constrained and do not follow redirects.
 - No analytics, telemetry, updater, or remote content.
+
+### What this app asks of the League client
+
+Everything the app does with League runs over the loopback connection described by the client's own
+lockfile. It makes exactly four requests, each on a fixed allowlist matched by exact equality — there
+is no arbitrary-endpoint path:
+
+| Request | Why |
+| --- | --- |
+| `GET /lol-summoner/v1/current-summoner` | Confirms and authenticates the connection when it connects |
+| `GET /lol-gameflow/v1/gameflow-phase` | The current game phase, for notifications |
+| `GET /lol-matchmaking/v1/ready-check` | The ready-check snapshot taken on connect |
+| `POST /lol-matchmaking/v1/ready-check/accept` | The only state-changing call: accepting a ready check |
+
+It also subscribes to the client's event stream. That subscription is the client's global JSON API
+event feed, and the app filters it in memory down to the two events it acts on — ready checks and
+game-phase changes. The subscription is read-only and does not widen the request surface above; the
+named event scopes are community knowledge rather than documented API, so it is deliberately left
+global rather than narrowed on a guess.
+
+The app talks only to `127.0.0.1` (that local client) and to the Discord webhook you configure
+yourself. It sends no telemetry, runs no other process, and the only thing it changes in the League
+client is accepting a ready check you would otherwise have clicked. Riot does not document or support
+third-party use of this API; this app is an ordinary user-mode program.
 
 ## License
 
