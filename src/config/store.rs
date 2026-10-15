@@ -175,7 +175,11 @@ impl SettingsStore {
     /// The file is written before the shared handle changes, so a refused save leaves the
     /// notification sender and the UI on the secret that is actually stored instead of on one that
     /// exists only in memory and disappears at the next launch.
-    pub fn set_webhook(&mut self, url: &str) -> Result<(), StoreError> {
+    ///
+    /// On success the status that is really stored is returned, so a caller that shares the store
+    /// can refresh what it shows from one call instead of re-entering the store while its own
+    /// mutable borrow is still alive.
+    pub fn set_webhook(&mut self, url: &str) -> Result<WebhookStatus, StoreError> {
         let url = url.trim();
         if !url.is_empty() && parse_discord_webhook_url(url).is_none() {
             return Err(StoreError::InvalidWebhook);
@@ -185,15 +189,21 @@ impl SettingsStore {
 
     /// Removes the stored Discord webhook, under the same write-first rule as
     /// [`SettingsStore::set_webhook`].
-    pub fn clear_webhook(&mut self) -> Result<(), StoreError> {
+    pub fn clear_webhook(&mut self) -> Result<WebhookStatus, StoreError> {
         self.commit_webhook(WebhookSecret::default())
     }
 
-    /// Persists `secret` and adopts it only once the file has accepted it.
-    fn commit_webhook(&mut self, secret: WebhookSecret) -> Result<(), StoreError> {
+    /// Persists `secret`, adopts it only once the file has accepted it, and reports the stored
+    /// status.
+    ///
+    /// Answering both halves of a change — what was written and what should now be shown — is what
+    /// lets a caller hold a single borrow: a `RefCell`-shared store panics with
+    /// `already mutably borrowed` if it is read again before the change's borrow has ended, and that
+    /// panic takes the whole process down.
+    fn commit_webhook(&mut self, secret: WebhookSecret) -> Result<WebhookStatus, StoreError> {
         self.save_with(&secret)?;
         self.replace_webhook(secret);
-        Ok(())
+        Ok(self.webhook_status())
     }
 
     /// Secret-free webhook status, suitable for application state and the UI.
@@ -893,6 +903,63 @@ mod tests {
         store.clear_webhook().unwrap();
         assert!(!store.webhook_status().configured);
         assert!(!webhook.read().unwrap().is_configured());
+    }
+
+    /// The UI refresh after a webhook change relies on the setter answering with the status that is
+    /// really stored: it must agree with a fresh read, because the caller must not take a second
+    /// borrow of a `RefCell`-shared store to find that out.
+    #[test]
+    fn a_webhook_change_reports_the_status_that_is_really_stored() {
+        let root = tempdir().unwrap();
+        let mut store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+        store.load().unwrap();
+
+        let after_save = store.set_webhook(SAMPLE_URL).unwrap();
+        assert_eq!(after_save, store.webhook_status());
+        assert!(after_save.configured);
+        assert_eq!(after_save.host.as_deref(), Some("discord.com"));
+
+        let after_clear = store.clear_webhook().unwrap();
+        assert_eq!(after_clear, store.webhook_status());
+        assert!(!after_clear.configured);
+        assert_eq!(after_clear, WebhookStatus::default());
+
+        // A refused change reports an error and stores nothing, so there is no status to report.
+        let refused = store.set_webhook("https://example.com/not-a-discord-webhook");
+        assert!(matches!(refused, Err(StoreError::InvalidWebhook)));
+        assert!(!store.webhook_status().configured);
+    }
+
+    /// Regression guard for the removal crash: the view holds the store behind `Rc<RefCell<_>>`, so
+    /// every change must be usable with a single bound borrow. Holding the borrow across the arms —
+    /// `match store.borrow_mut().clear_webhook() { Ok(()) => store.borrow()… }` — panics with
+    /// `already mutably borrowed`, which closed the application and its tray.
+    #[test]
+    fn a_shared_store_takes_one_borrow_per_webhook_change() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let root = tempdir().unwrap();
+        let cell = Rc::new(RefCell::new(SettingsStore::new(
+            root.path(),
+            Box::new(FakeCodec),
+        )));
+        cell.borrow_mut().load().unwrap();
+
+        let outcome = cell.borrow_mut().set_webhook(SAMPLE_URL);
+        let status = outcome.expect("the store accepts a valid webhook");
+        assert!(status.configured);
+        // The borrow ended with the statement above, so the store can be read again here — and is.
+        assert_eq!(cell.borrow().webhook_status(), status);
+
+        let outcome = cell.borrow_mut().clear_webhook();
+        let status = outcome.expect("the store accepts a removal");
+        assert!(!status.configured);
+        assert_eq!(cell.borrow().webhook_status(), status);
+        assert!(
+            cell.try_borrow_mut().is_ok(),
+            "no borrow may outlive a change"
+        );
     }
 
     #[test]

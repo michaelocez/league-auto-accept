@@ -286,10 +286,15 @@ impl Dashboard {
     /// adopts), so the status shown stays the one that is really in use, the typed value is kept so
     /// it can be retried, and the failure is reported in the same banner as other settings failures.
     fn save_webhook(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The result is bound before it is matched: a `match` on the store's own borrow would keep
+        // that borrow alive through every arm, and the arm's second read of the `RefCell`-shared
+        // store would panic with `already mutably borrowed`, closing the process and the tray with
+        // it. Binding ends the borrow with this statement, and the store answers with the status it
+        // really stored, so no second read is needed.
         let outcome = self.store.borrow_mut().set_webhook(&self.webhook_draft);
         match outcome {
-            Ok(()) => {
-                self.state.webhook_status = self.store.borrow().webhook_status();
+            Ok(status) => {
+                self.state.webhook_status = status;
                 self.state.webhook_test = None;
                 self.state.settings_error = None;
                 self.webhook_draft.clear();
@@ -299,7 +304,8 @@ impl Dashboard {
                 });
             }
             Err(error) => {
-                self.state.webhook_status = self.store.borrow().webhook_status();
+                // The store writes before it adopts, so a refusal leaves the stored webhook — and
+                // the status already shown for it — untouched.
                 log::error!("failed to save the Discord webhook: {error}");
                 self.state.settings_error = Some(webhook_error_message("saved", &error));
             }
@@ -309,14 +315,18 @@ impl Dashboard {
 
     /// Removes the stored webhook. The view cannot do this through a settings patch.
     fn clear_webhook(&mut self, cx: &mut Context<Self>) {
-        match self.store.borrow_mut().clear_webhook() {
-            Ok(()) => {
-                self.state.webhook_status = self.store.borrow().webhook_status();
+        // Bound for the same reason as `save_webhook`: the store must not be read while the borrow
+        // performing the removal is still alive.
+        let outcome = self.store.borrow_mut().clear_webhook();
+        match outcome {
+            Ok(status) => {
+                self.state.webhook_status = status;
                 self.state.webhook_test = None;
                 self.state.settings_error = None;
             }
             Err(error) => {
-                self.state.webhook_status = self.store.borrow().webhook_status();
+                // A refused removal leaves the stored webhook in place, so the status shown stays
+                // the one that is really in use.
                 log::error!("failed to clear the Discord webhook: {error}");
                 self.state.settings_error = Some(webhook_error_message("removed", &error));
             }
