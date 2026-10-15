@@ -63,6 +63,16 @@ impl ClientLocator {
         self.find_running_clients().into_iter().next()
     }
 
+    /// Re-reads one installation's lockfile, if it is there and currently parses.
+    ///
+    /// This is how an established connection is re-checked: by the installation it was verified
+    /// against, not by whichever installation discovery happens to list first. A stale lockfile
+    /// left behind by a client that has exited still parses, so taking the first one would end a
+    /// connection that is perfectly alive.
+    pub fn client_at(&self, install_path: &Path) -> Option<LcuCredentials> {
+        read_lockfile(install_path)
+    }
+
     /// Returns the ordered, de-duplicated list of League installation directories.
     pub fn discover_install_paths(&self) -> Vec<PathBuf> {
         let mut candidates = self.metadata_install_paths();

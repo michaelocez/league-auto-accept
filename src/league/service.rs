@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::discovery::ClientLocator;
+use super::lockfile::LcuCredentials;
 use super::ready_check::{parse_lcu_event, Effect, LcuEvent, Lifecycle, ReadyCheckMachine, Status};
 use super::transport::{LcuEventSocket, LcuRestClient, SocketEvent};
 
@@ -95,6 +96,36 @@ impl MachineSession {
     }
 }
 
+/// The installation the service is bound to, together with the REST client that proved it live.
+struct BoundClient {
+    credentials: LcuCredentials,
+    rest: Arc<LcuRestClient>,
+}
+
+/// Picks the installation the service should talk to.
+///
+/// Installations are listed in a fixed order, but a lockfile on disk does not prove that a client is
+/// running: only a health check does. So each candidate gets one turn at `verify()`, and the first
+/// one to answer wins. This is the only place a client is chosen — the poll re-checks the
+/// installation chosen here instead of running discovery again, because an earlier installation
+/// whose client has exited still has a parseable lockfile and would otherwise evict a live one.
+async fn select_client(candidates: &[LcuCredentials]) -> Option<BoundClient> {
+    for credentials in candidates {
+        let rest = Arc::new(LcuRestClient::new(credentials.clone()));
+        if rest.verify().await.is_ok() {
+            return Some(BoundClient {
+                credentials: credentials.clone(),
+                rest,
+            });
+        }
+        log::debug!(
+            "LCU at {} did not respond; trying the next installation",
+            credentials.install_path.display()
+        );
+    }
+    None
+}
+
 pub struct LeagueService {
     locator: ClientLocator,
     session: MachineSession,
@@ -146,25 +177,11 @@ impl LeagueService {
 
         self.emit(ServiceEvent::Connection { connected: false });
 
-        // Every installation with a parseable lockfile gets a turn: one can be listed while its
-        // client is gone or unresponsive, and that must not stop the service reaching a client
-        // that is really there.
-        let mut live = None;
-        for credentials in candidates {
-            let rest = Arc::new(LcuRestClient::new(credentials.clone()));
-            if rest.verify().await.is_ok() {
-                live = Some((credentials, rest));
-                break;
-            }
-            log::debug!(
-                "LCU at {} did not respond; trying the next installation",
-                credentials.install_path.display()
-            );
-        }
-        let Some((credentials, rest)) = live else {
+        let Some(bound) = select_client(&candidates).await else {
             self.disconnect();
             return;
         };
+        let BoundClient { credentials, rest } = bound;
 
         let mut socket = match LcuEventSocket::new(credentials.clone()).connect().await {
             Ok(socket) => socket,
@@ -226,23 +243,19 @@ impl LeagueService {
                 _ = poll.tick() => {
                     let effects = self.session.sync_enabled();
                     self.handle_effects(effects, Some(&rest), Some(&input_tx));
-                    match self.locator.find_running_client() {
-                        // League rewrites its lockfile in place, so a read can land mid-write and
-                        // parse as nothing while the client is still running. Only an absent
-                        // lockfile means this connection is really over; a closed socket says so
-                        // too, and the keepalive bounds how long a wedged one can hide that.
-                        None if !lockfile_is_gone(&credentials.install_path) => {
+                    // The connection is judged by the installation it was verified against. A failed
+                    // read is not proof that the client exited: League rewrites its lockfile in
+                    // place, so a read can land mid-write. A closed socket says so too, and the
+                    // keepalive bounds how long a wedged one can hide that.
+                    match connection_state(&self.locator, &credentials) {
+                        ConnectionState::Live => {}
+                        ConnectionState::MidWrite => {
                             log::debug!("lockfile unreadable but present; keeping the connection");
                         }
-                        None => {
+                        ConnectionState::Replaced | ConnectionState::Gone => {
                             self.emit(ServiceEvent::Connection { connected: false });
                             break;
                         }
-                        Some(next) if next.signature() != credentials.signature() => {
-                            self.emit(ServiceEvent::Connection { connected: false });
-                            break;
-                        }
-                        Some(_) => {}
                     }
                 }
             }
@@ -358,6 +371,33 @@ fn parse_text_event(text: &str) -> Option<LcuEvent> {
     parse_lcu_event(&value)
 }
 
+/// What the connected installation's lockfile says about the live connection.
+#[derive(Debug, PartialEq, Eq)]
+enum ConnectionState {
+    /// The same client is still there.
+    Live,
+    /// The lockfile parses to different credentials: the client restarted.
+    Replaced,
+    /// The lockfile is present but does not parse right now: League rewrites it in place.
+    MidWrite,
+    /// The lockfile is gone: the client exited.
+    Gone,
+}
+
+/// Judges an established connection by the installation it was verified against.
+///
+/// Discovery order is deliberately not consulted. A second installation can be listed first with a
+/// lockfile left behind by a client that has exited, and comparing the connection against that one
+/// tore down a live client on every poll.
+fn connection_state(locator: &ClientLocator, connected: &LcuCredentials) -> ConnectionState {
+    match locator.client_at(&connected.install_path) {
+        Some(current) if current.signature() == connected.signature() => ConnectionState::Live,
+        Some(_) => ConnectionState::Replaced,
+        None if lockfile_is_gone(&connected.install_path) => ConnectionState::Gone,
+        None => ConnectionState::MidWrite,
+    }
+}
+
 /// Whether a failed discovery read means a connection's client is gone.
 ///
 /// A lockfile that exists but does not parse is a read that landed while League was rewriting it;
@@ -388,6 +428,90 @@ mod tests {
 
         std::fs::remove_file(install.join("lockfile")).unwrap();
         assert!(lockfile_is_gone(&install));
+    }
+
+    fn lockfile_text(port: u16, secret: &str) -> String {
+        format!("LeagueClientUx:1234:{port}:{secret}:https")
+    }
+
+    /// Two installations in discovery order — the first with a lockfile whose client has exited, the
+    /// second live — a layout that parsing a lockfile cannot tell apart from two live clients.
+    ///
+    /// Returns the locator and the credentials of the installation that would answer a health check.
+    fn stale_then_live() -> (tempfile::TempDir, ClientLocator, LcuCredentials) {
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("League of Legends");
+        let live = root.path().join("Pbe");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(stale.join("lockfile"), lockfile_text(54321, "stale-secret")).unwrap();
+        std::fs::write(live.join("lockfile"), lockfile_text(54322, "live-secret")).unwrap();
+
+        let locator = ClientLocator::new(
+            Some(root.path().join("empty-metadata")),
+            vec![stale.clone(), live.clone()],
+        );
+        let connected = locator
+            .find_running_clients()
+            .into_iter()
+            .find(|client| client.install_path == live)
+            .expect("the live installation is listed");
+        (root, locator, connected)
+    }
+
+    #[test]
+    fn a_stale_installation_listed_first_does_not_tear_down_the_connected_one() {
+        let (_root, locator, connected) = stale_then_live();
+
+        // The connection is judged by the installation that answered the health check, which is
+        // still running, so the poll leaves it alone.
+        assert_eq!(
+            connection_state(&locator, &connected),
+            ConnectionState::Live
+        );
+
+        // Discovery, meanwhile, still offers the stale installation first: its lockfile parses even
+        // though its client is gone, and comparing the connection against it is what used to end a
+        // live connection on every poll.
+        let first_listed = locator
+            .find_running_client()
+            .expect("a stale lockfile still parses");
+        assert_ne!(first_listed.install_path, connected.install_path);
+        assert_ne!(first_listed.signature(), connected.signature());
+    }
+
+    #[test]
+    fn the_connection_follows_its_own_installation_through_a_rewrite_restart_and_exit() {
+        let (_root, locator, connected) = stale_then_live();
+        let lockfile = connected.install_path.join("lockfile");
+
+        // League rewrites the lockfile in place: a read can land mid-write and parse as nothing.
+        std::fs::write(&lockfile, "LeagueClientUx:1234").unwrap();
+        assert_eq!(
+            connection_state(&locator, &connected),
+            ConnectionState::MidWrite
+        );
+
+        // The client restarted with different credentials.
+        std::fs::write(&lockfile, lockfile_text(60000, "restarted-secret")).unwrap();
+        assert_eq!(
+            connection_state(&locator, &connected),
+            ConnectionState::Replaced
+        );
+
+        // The client exited.
+        std::fs::remove_file(&lockfile).unwrap();
+        assert_eq!(
+            connection_state(&locator, &connected),
+            ConnectionState::Gone
+        );
+
+        // A rewrite that keeps the same credentials is still the same client.
+        std::fs::write(&lockfile, lockfile_text(54322, "live-secret")).unwrap();
+        assert_eq!(
+            connection_state(&locator, &connected),
+            ConnectionState::Live
+        );
     }
 
     fn session(enabled: bool) -> (MachineSession, Arc<AtomicBool>) {
