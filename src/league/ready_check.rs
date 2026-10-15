@@ -638,4 +638,75 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
     }
+
+    /// The WebSocket subscription is global, so every LCU event arrives; the parser is what keeps the
+    /// machine to the two events it acts on. Everything else has to be ignored, not guessed at.
+    #[test]
+    fn ignores_every_event_the_machine_does_not_act_on() {
+        // The summoner endpoint is in the request allowlist but is not an event the machine acts on,
+        // so it belongs in this list too.
+        let unrelated = [
+            "/lol-chat/v1/friends",
+            "/lol-gameflow/v1/session",
+            "/lol-matchmaking/v1/search",
+            "/lol-summoner/v1/current-summoner",
+            "/lol-matchmaking/v1/ready-check/decline",
+            "/riotclient/command-line-args",
+        ];
+        for uri in unrelated {
+            let event = serde_json::json!([
+                8,
+                "OnJsonApiEvent",
+                {"uri": uri, "eventType": "Update", "data": {"state": "InProgress", "playerResponse": "Accepted"}}
+            ]);
+            assert!(parse_lcu_event(&event).is_none(), "{uri} must be ignored");
+        }
+
+        // Near misses: an acted-on URI carrying data the machine cannot use is still not an event.
+        let wrong_shape = serde_json::json!([
+            8,
+            "OnJsonApiEvent",
+            {"uri": READY_CHECK_ENDPOINT, "eventType": "Update", "data": "InProgress"}
+        ]);
+        assert!(parse_lcu_event(&wrong_shape).is_none());
+
+        let phase_is_not_a_string = serde_json::json!([
+            8,
+            "OnJsonApiEvent",
+            {"uri": GAMEFLOW_ENDPOINT, "eventType": "Update", "data": {"phase": "InProgress"}}
+        ]);
+        assert!(parse_lcu_event(&phase_is_not_a_string).is_none());
+
+        // Malformed envelopes carry no URI to match on, and must not panic.
+        for malformed in [
+            serde_json::json!([]),
+            serde_json::json!([8, "OnJsonApiEvent"]),
+            serde_json::json!([8, "OnJsonApiEvent", {}]),
+            serde_json::json!([8, "OnJsonApiEvent", {"data": "InProgress"}]),
+            serde_json::json!(null),
+        ] {
+            assert!(parse_lcu_event(&malformed).is_none(), "{malformed}");
+        }
+
+        // The two events the machine does act on still parse.
+        let ready = serde_json::json!([
+            8,
+            "OnJsonApiEvent",
+            {"uri": READY_CHECK_ENDPOINT, "eventType": "Update", "data": {"state": "InProgress", "playerResponse": "None"}}
+        ]);
+        assert!(matches!(
+            parse_lcu_event(&ready),
+            Some(LcuEvent::ReadyCheck { .. })
+        ));
+
+        let phase = serde_json::json!([
+            8,
+            "OnJsonApiEvent",
+            {"uri": GAMEFLOW_ENDPOINT, "eventType": "Update", "data": "ChampSelect"}
+        ]);
+        assert!(matches!(
+            parse_lcu_event(&phase),
+            Some(LcuEvent::GameflowPhase { .. })
+        ));
+    }
 }
