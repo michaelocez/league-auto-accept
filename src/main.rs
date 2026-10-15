@@ -73,6 +73,10 @@ fn main() {
     let notifications = background.notifications.clone();
     tray::spawn(tx.clone(), settings_shared.clone());
 
+    // Closing the main window with minimize-to-tray off exits through this channel, so the pending
+    // settings write is flushed by the view before the process goes away.
+    platform_window::request_exit_through(tx.clone());
+
     // The tray popup sends its intents through the same channel as the tray.
     let ui_tx = tx.clone();
 

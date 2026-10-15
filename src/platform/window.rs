@@ -15,8 +15,11 @@
 //! custom close button or a hit-test override would miss.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use gpui::Window;
+
+use crate::app::events::AppEvent;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
@@ -30,6 +33,44 @@ static HIDE_ON_CLOSE: AtomicBool = AtomicBool::new(false);
 
 /// Identifies our subclass within the window; unique per window, any non-zero value works.
 const CLOSE_SUBCLASS_ID: usize = 1;
+
+/// Where a window close is handed to the application.
+///
+/// The window procedure cannot write the pending settings edit itself — that is GPUI view state, and
+/// calling into GPUI from inside the Win32 message dispatch would re-enter its borrows. So a close
+/// with minimize-to-tray off becomes an application event, and the window stays open until the
+/// application exits through its own shutdown path.
+static CLOSE_REQUESTS: OnceLock<async_channel::Sender<AppEvent>> = OnceLock::new();
+
+/// Routes a window close to the application. Call once, before the main window is opened.
+pub fn request_exit_through(tx: async_channel::Sender<AppEvent>) {
+    let _ = CLOSE_REQUESTS.set(tx);
+}
+
+/// What a `WM_CLOSE` means for the window procedure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseAction {
+    /// Minimize-to-tray is on: hide the window and keep running.
+    Hide,
+    /// Minimize-to-tray is off: ask the application to exit, so pending settings are written first.
+    RequestExit,
+}
+
+fn close_action(hide_on_close: bool) -> CloseAction {
+    if hide_on_close {
+        CloseAction::Hide
+    } else {
+        CloseAction::RequestExit
+    }
+}
+
+/// Asks the application to exit. `false` means the request could not be delivered, so the window has
+/// to be allowed to close directly rather than becoming unclosable.
+fn request_exit() -> bool {
+    CLOSE_REQUESTS
+        .get()
+        .is_some_and(|tx| tx.try_send(AppEvent::CloseRequested).is_ok())
+}
 
 /// Returns the native window handle for a GPUI window.
 ///
@@ -60,8 +101,9 @@ pub fn set_hide_on_close(hide_on_close: bool) {
     HIDE_ON_CLOSE.store(hide_on_close, Ordering::Relaxed);
 }
 
-/// Hides the window instead of closing it while minimize-to-tray is on, and lets every other
-/// message reach GPUI's own window procedure untouched.
+/// Hides the window instead of closing it while minimize-to-tray is on, hands a close to the
+/// application while it is off, and lets every other message reach GPUI's own window procedure
+/// untouched.
 unsafe extern "system" fn close_subclass(
     hwnd: HWND,
     msg: u32,
@@ -71,10 +113,21 @@ unsafe extern "system" fn close_subclass(
     _reference_data: usize,
 ) -> LRESULT {
     if msg == WM_CLOSE {
-        if HIDE_ON_CLOSE.load(Ordering::Relaxed) {
-            log::info!("close intercepted: hiding to tray");
-            ShowWindow(hwnd, SW_HIDE);
-            return 0;
+        match close_action(HIDE_ON_CLOSE.load(Ordering::Relaxed)) {
+            CloseAction::Hide => {
+                log::info!("close intercepted: hiding to tray");
+                ShowWindow(hwnd, SW_HIDE);
+                return 0;
+            }
+            CloseAction::RequestExit => {
+                // Exiting through the application writes the debounced settings edit first; letting
+                // WM_CLOSE through here would drop the last keystrokes.
+                if request_exit() {
+                    log::info!("close requested: exiting through the application");
+                    return 0;
+                }
+                log::warn!("could not deliver the close request; closing the window directly");
+            }
         }
         log::info!("close allowed: exiting application");
     }
@@ -98,5 +151,27 @@ pub fn show_hwnd(hwnd: isize) {
             ShowWindow(hwnd, SW_SHOW);
         }
         SetForegroundWindow(hwnd);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_close_hides_to_the_tray_or_asks_the_application_to_exit() {
+        assert_eq!(close_action(true), CloseAction::Hide);
+        assert_eq!(close_action(false), CloseAction::RequestExit);
+    }
+
+    #[test]
+    fn requesting_an_exit_delivers_one_close_request() {
+        let (tx, rx) = async_channel::unbounded();
+        // The slot is process-wide and can only be filled once, so this is the only test that sets it.
+        request_exit_through(tx);
+
+        assert!(request_exit());
+        assert!(matches!(rx.try_recv(), Ok(AppEvent::CloseRequested)));
+        assert!(rx.try_recv().is_err(), "one close means one request");
     }
 }
