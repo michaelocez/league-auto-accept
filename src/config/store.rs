@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::notifications::discord::{parse_discord_webhook_url, WebhookSecret, WebhookStatus};
 
-use super::secret::{default_secret_codec, SecretCodec, StoredSecret};
+use super::secret::{default_secret_codec, SecretCodec, SecretError, StoredSecret};
 use super::settings::{merge_settings, normalize_settings, AppSettings};
 
 const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -24,6 +24,8 @@ pub enum StoreError {
     Json(serde_json::Error),
     /// A webhook URL failed Discord validation before it could be stored.
     InvalidWebhook,
+    /// The webhook secret could not be protected for storage, so nothing was written.
+    Secret(SecretError),
 }
 
 impl std::fmt::Display for StoreError {
@@ -32,11 +34,18 @@ impl std::fmt::Display for StoreError {
             StoreError::Io(error) => write!(f, "settings I/O error: {error}"),
             StoreError::Json(error) => write!(f, "settings JSON error: {error}"),
             StoreError::InvalidWebhook => write!(f, "the Discord webhook URL is not valid"),
+            StoreError::Secret(error) => write!(f, "{error}"),
         }
     }
 }
 
 impl std::error::Error for StoreError {}
+
+impl From<SecretError> for StoreError {
+    fn from(error: SecretError) -> Self {
+        StoreError::Secret(error)
+    }
+}
 
 impl From<std::io::Error> for StoreError {
     fn from(error: std::io::Error) -> Self {
@@ -253,7 +262,9 @@ impl SettingsStore {
     /// second: `save` passes the secret already in the handle, and the setters pass the candidate.
     fn save_with(&self, secret: &WebhookSecret) -> Result<(), StoreError> {
         let mut stored = serde_json::to_value(&self.settings)?;
-        let encoded = self.codec.encode(secret.expose());
+        // A value the OS will not protect is refused here, before anything is written, so the
+        // persisted secret and the in-memory handle both keep the value they already had.
+        let encoded = self.codec.encode(secret.expose())?;
         if let Some(object) = stored.as_object_mut() {
             object.insert("discordWebhookUrl".into(), serde_json::to_value(encoded)?);
         }
@@ -508,6 +519,14 @@ pub fn webhook_error_message(action: &str, error: &StoreError) -> String {
         return "That is not a valid Discord webhook URL, so the webhook was left as it was."
             .to_string();
     }
+    // A refused protection fails before any write is attempted, so this branch must not send the
+    // user to a log that was never written.
+    if matches!(error, StoreError::Secret(_)) {
+        return format!(
+            "The Discord webhook could not be {action} — {error}. The webhook already stored is \
+             still the one in use, and nothing was written."
+        );
+    }
     let note = restricted_launch_note().unwrap_or("");
     format!(
         "The Discord webhook could not be {action} — {error}. The webhook already stored is still \
@@ -539,7 +558,7 @@ fn stored_secret(value: &Value) -> Option<StoredSecret> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::secret::StoredSecret;
+    use crate::config::secret::{SecretError, StoredSecret};
     use base64::Engine as _;
     use serde_json::json;
     use tempfile::tempdir;
@@ -548,16 +567,20 @@ mod tests {
     const SAMPLE_URL: &str =
         "https://discord.com/api/webhooks/12345678901234567/tttttttttttttttttttttttttttttttttttttttt";
 
+    /// A second valid webhook, used to prove a refused change leaves the *first* one in place.
+    const OTHER_URL: &str =
+        "https://discord.com/api/webhooks/22345678901234567/uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu";
+
     /// Deterministic codec that base64-wraps the secret so the plaintext never appears in the file.
     struct FakeCodec;
 
     impl SecretCodec for FakeCodec {
-        fn encode(&self, value: &str) -> StoredSecret {
-            StoredSecret {
+        fn encode(&self, value: &str) -> Result<StoredSecret, SecretError> {
+            Ok(StoredSecret {
                 protection: "os".into(),
                 value: base64::engine::general_purpose::STANDARD
                     .encode(format!("protected:{value}")),
-            }
+            })
         }
 
         fn decode(&self, secret: &StoredSecret) -> String {
@@ -567,6 +590,26 @@ mod tests {
                 .unwrap_or_default()
                 .trim_start_matches("protected:")
                 .to_string()
+        }
+    }
+
+    /// A codec that refuses to protect a real value, standing in for a failed `CryptProtectData`.
+    /// An empty webhook is not a secret, so it still persists — matching the real codec.
+    struct RefusingCodec;
+
+    impl SecretCodec for RefusingCodec {
+        fn encode(&self, value: &str) -> Result<StoredSecret, SecretError> {
+            if value.is_empty() {
+                return Ok(StoredSecret {
+                    protection: "os".into(),
+                    value: String::new(),
+                });
+            }
+            Err(SecretError)
+        }
+
+        fn decode(&self, secret: &StoredSecret) -> String {
+            secret.value.clone()
         }
     }
 
@@ -989,6 +1032,49 @@ mod tests {
         assert!(!webhook.read().unwrap().is_configured());
     }
 
+    /// The defect this guards: when the OS refused to protect the webhook, the URL used to be stored
+    /// as `protection: "plain"` in the clear, silently. A refusal must instead be reported, with the
+    /// webhook already stored left as the one in use and nothing written.
+    #[test]
+    fn a_webhook_the_codec_refuses_to_protect_is_not_stored_in_cleartext() {
+        let root = tempdir().unwrap();
+        let path = root.path().join(SETTINGS_FILE_NAME);
+        // Seed a stored webhook directly, because this codec cannot encode one.
+        std::fs::write(
+            &path,
+            serde_json::to_string(&json!({
+                "discordWebhookUrl": { "protection": "os", "value": SAMPLE_URL }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let webhook = Arc::new(RwLock::new(WebhookSecret::default()));
+        let mut store =
+            SettingsStore::with_webhook(root.path(), Box::new(RefusingCodec), webhook.clone());
+        store.load().unwrap();
+        assert!(
+            store.webhook_status().configured,
+            "the seeded webhook loads"
+        );
+
+        let error = store
+            .set_webhook(OTHER_URL)
+            .expect_err("a codec that refuses to protect must refuse the change");
+        assert!(matches!(error, StoreError::Secret(_)));
+
+        // Nothing was adopted and nothing was written: the stored webhook is still the first one.
+        assert_eq!(webhook.read().unwrap().expose(), SAMPLE_URL);
+        assert_eq!(store.webhook_status().host.as_deref(), Some("discord.com"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        // The banner explains the refusal without sending the user to a log that was never written.
+        let message = webhook_error_message("saved", &error);
+        assert!(message.contains("still the one in use"), "{message}");
+        assert!(!message.contains("settings-error.log"), "{message}");
+    }
+
     /// The UI refresh after a webhook change relies on the setter answering with the status that is
     /// really stored: it must agree with a fresh read, because the caller must not take a second
     /// borrow of a `RefCell`-shared store to find that out.
@@ -1060,5 +1146,11 @@ mod tests {
 
         let invalid = webhook_error_message("saved", &StoreError::InvalidWebhook);
         assert!(invalid.contains("not a valid Discord webhook URL"));
+
+        // A refused protection never reaches the file, so its message must not promise a log entry.
+        let unprotected = webhook_error_message("saved", &StoreError::Secret(SecretError));
+        assert!(unprotected.contains("could not be saved"), "{unprotected}");
+        assert!(unprotected.contains("nothing was written"), "{unprotected}");
+        assert!(!unprotected.contains("settings-error.log"), "{unprotected}");
     }
 }
