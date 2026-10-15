@@ -2,6 +2,7 @@
 
 pub mod components;
 pub mod dashboard;
+pub mod decisions;
 pub mod shell;
 pub mod theme;
 pub mod tray_popup;

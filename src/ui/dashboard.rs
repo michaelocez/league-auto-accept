@@ -23,7 +23,7 @@ use crate::app::state::{ActivityKind, AppState};
 use crate::config::settings::{
     is_valid_discord_id, AppSettings, BackdropMode, DiscordMention, ThemeMode, MAX_DISCORD_USER_IDS,
 };
-use crate::config::store::{save_error_message, webhook_error_message, SettingsStore};
+use crate::config::store::{save_error_message, SettingsStore};
 use crate::notifications::discord::{
     content_error, parse_discord_webhook_url, preview_notification,
 };
@@ -33,22 +33,13 @@ use crate::platform::window as platform_window;
 use crate::ui::components::{
     Button, ButtonVariant, Divider, Elevation, Row, SettingsGroup, Surface, Toggle,
 };
+use crate::ui::decisions::{self, ToggleSetting, WebhookChange};
 use crate::ui::shell::{PageHeader, Screen, Sidebar, TitleBar};
 use crate::ui::theme::{self, Appearance, SurfaceTreatment, Theme};
 
 /// How long a text edit settles before the settings file is written. A write re-encodes the whole
 /// file, so a burst of keystrokes is coalesced into one, as in the reference implementation.
 const SETTINGS_WRITE_DEBOUNCE: Duration = Duration::from_millis(300);
-
-/// Which boolean setting a toggle row switch controls.
-#[derive(Clone, Copy)]
-enum ToggleSetting {
-    DiscordNotifications,
-    QueuePopped,
-    AutoAccepted,
-    GameStarted,
-    MinimizeToTray,
-}
 
 /// The three editable notification message templates, newest state in their input entities.
 struct MessageTemplates {
@@ -71,6 +62,8 @@ pub struct Dashboard {
     /// A pending debounced settings write; dropping it cancels the write.
     pending_write: Option<Task<()>>,
     templates: MessageTemplates,
+    /// GPUI subscriptions are RAII — dropping one unsubscribes it — so the vec is held for the
+    /// view's lifetime to keep the input handlers attached, even though nothing reads it.
     #[allow(dead_code)]
     subscriptions: Vec<Subscription>,
     screen: Screen,
@@ -189,10 +182,6 @@ impl Dashboard {
         )
     }
 
-    pub fn state(&self) -> &AppState {
-        &self.state
-    }
-
     fn persist(&mut self, patch: serde_json::Value) {
         let outcome = self.store.borrow_mut().update(&patch);
         // `update` merges the patch before writing, so the store's snapshot is the user's intent
@@ -262,12 +251,13 @@ impl Dashboard {
             // Handled by the shell (opens the tray popup window); nothing to apply here.
             AppEvent::Tray(TrayCommand::OpenPopup) => {}
             AppEvent::Tray(TrayCommand::ToggleAutoAccept) => {
-                let next = !self.state.settings.auto_accept_enabled;
-                self.set_auto_accept(next);
+                self.toggle_auto_accept();
             }
             AppEvent::Tray(TrayCommand::ToggleDiscordNotifications) => {
-                let next = !self.state.settings.discord_notifications_enabled;
-                self.persist(json!({ "discordNotificationsEnabled": next }));
+                self.persist(decisions::toggle_patch(
+                    ToggleSetting::DiscordNotifications,
+                    &self.state.settings,
+                ));
             }
             AppEvent::Service(service_event) => self.state.apply_service_event(&service_event),
             AppEvent::WebhookTest(result) => {
@@ -278,10 +268,12 @@ impl Dashboard {
         EventOutcome::Continue
     }
 
-    fn set_auto_accept(&mut self, enabled: bool) {
-        self.state.settings.auto_accept_enabled = enabled;
-        self.enabled_flag.store(enabled, Ordering::Relaxed);
-        self.persist(json!({ "autoAcceptEnabled": enabled }));
+    /// Flips Auto Accept from the value the UI is showing. The flag the running service reads and the
+    /// value that is persisted come from the same decision, so they cannot drift apart.
+    fn toggle_auto_accept(&mut self) {
+        let change = decisions::auto_accept_change(self.state.settings.auto_accept_enabled);
+        self.enabled_flag.store(change.enabled, Ordering::Relaxed);
+        self.persist(change.patch);
     }
 
     /// Stores the typed webhook through the store's validating setter. The view never reads the
@@ -297,8 +289,8 @@ impl Dashboard {
         // it. Binding ends the borrow with this statement, and the store answers with the status it
         // really stored, so no second read is needed.
         let outcome = self.store.borrow_mut().set_webhook(&self.webhook_draft);
-        match outcome {
-            Ok(status) => {
+        match decisions::webhook_change("saved", outcome) {
+            WebhookChange::Applied(status) => {
                 self.state.webhook_status = status;
                 self.state.webhook_test = None;
                 self.state.settings_error = None;
@@ -308,11 +300,11 @@ impl Dashboard {
                     state.set_value(String::new(), window, cx);
                 });
             }
-            Err(error) => {
+            WebhookChange::Refused(message) => {
                 // The store writes before it adopts, so a refusal leaves the stored webhook — and
                 // the status already shown for it — untouched.
-                log::error!("failed to save the Discord webhook: {error}");
-                self.state.settings_error = Some(webhook_error_message("saved", &error));
+                log::error!("{message}");
+                self.state.settings_error = Some(message);
             }
         }
         cx.notify();
@@ -323,17 +315,17 @@ impl Dashboard {
         // Bound for the same reason as `save_webhook`: the store must not be read while the borrow
         // performing the removal is still alive.
         let outcome = self.store.borrow_mut().clear_webhook();
-        match outcome {
-            Ok(status) => {
+        match decisions::webhook_change("removed", outcome) {
+            WebhookChange::Applied(status) => {
                 self.state.webhook_status = status;
                 self.state.webhook_test = None;
                 self.state.settings_error = None;
             }
-            Err(error) => {
+            WebhookChange::Refused(message) => {
                 // A refused removal leaves the stored webhook in place, so the status shown stays
                 // the one that is really in use.
-                log::error!("failed to clear the Discord webhook: {error}");
-                self.state.settings_error = Some(webhook_error_message("removed", &error));
+                log::error!("{message}");
+                self.state.settings_error = Some(message);
             }
         }
         cx.notify();
@@ -390,28 +382,7 @@ impl Dashboard {
     ) -> Row {
         let toggle = Toggle::new(id).checked(checked).on_change(cx.listener(
             move |this, _event: &ClickEvent, _window, cx| {
-                match setting {
-                    ToggleSetting::DiscordNotifications => {
-                        let next = !this.state.settings.discord_notifications_enabled;
-                        this.persist(json!({ "discordNotificationsEnabled": next }));
-                    }
-                    ToggleSetting::QueuePopped => {
-                        let next = !this.state.settings.notification_events.queue_popped;
-                        this.persist(json!({ "notificationEvents": { "queuePopped": next } }));
-                    }
-                    ToggleSetting::AutoAccepted => {
-                        let next = !this.state.settings.notification_events.auto_accepted;
-                        this.persist(json!({ "notificationEvents": { "autoAccepted": next } }));
-                    }
-                    ToggleSetting::GameStarted => {
-                        let next = !this.state.settings.notification_events.game_started;
-                        this.persist(json!({ "notificationEvents": { "gameStarted": next } }));
-                    }
-                    ToggleSetting::MinimizeToTray => {
-                        let next = !this.state.settings.minimize_to_tray;
-                        this.persist(json!({ "minimizeToTray": next }));
-                    }
-                }
+                this.persist(decisions::toggle_patch(setting, &this.state.settings));
                 cx.notify();
             },
         ));
@@ -490,8 +461,7 @@ impl Dashboard {
                                 .checked(auto_accept)
                                 .on_change(cx.listener(
                                     move |this, _event: &ClickEvent, _window, cx| {
-                                        let next = !this.state.settings.auto_accept_enabled;
-                                        this.set_auto_accept(next);
+                                        this.toggle_auto_accept();
                                         cx.notify();
                                     },
                                 )),
