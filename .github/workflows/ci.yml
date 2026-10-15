@@ -1,8 +1,8 @@
 name: CI
 
-# Formatting and lint gates for changes targeting main. The release workflow still owns the test
-# suite and the portable build; these checks run on every pull request so a warning cannot reach
-# main unnoticed.
+# Quality gates for changes targeting main: conflict markers, formatting, lint and the test suite. The
+# release workflow still owns the portable build; these checks run on every pull request so a warning
+# or a failing test cannot reach main unnoticed.
 #
 # Third-party actions are pinned to immutable commit SHAs for supply-chain hardening.
 
@@ -53,3 +53,8 @@ jobs:
 
       - name: Lint
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      # Linting proves nothing about behaviour: without this step a pull request can merge with
+      # failing tests and main would not find out until the release workflow runs at tag time.
+      - name: Test
+        run: cargo test --locked --all-targets
