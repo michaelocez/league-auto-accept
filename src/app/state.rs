@@ -78,7 +78,8 @@ pub struct AppState {
     pub webhook_test: Option<WebhookResult>,
     /// Whether a Test Webhook request is in flight.
     pub webhook_testing: bool,
-    /// Why the last settings write failed, if it did. The change is still applied in memory.
+    /// The message shown in the window's error banner: the last settings write that was refused
+    /// (the change is still applied in memory), or a background worker that has stopped.
     pub settings_error: Option<String>,
 }
 
@@ -118,6 +119,16 @@ impl AppState {
                     Lifecycle::GameStarted => ("Game started", ActivityKind::Info),
                 };
                 self.push_activity(label, kind);
+            }
+            // The worker that feeds this channel has stopped, so nothing else will arrive: the UI
+            // must stop reporting a state it can no longer observe and say what happened instead of
+            // waiting on a channel that will stay silent.
+            ServiceEvent::Stopped { message } => {
+                self.connection = ConnectionStatus::Disconnected;
+                self.ready_check = ReadyCheckStatus::Error;
+                self.ready_check_message = message.clone();
+                self.webhook_testing = false;
+                self.settings_error = Some(message.clone());
             }
         }
     }
@@ -188,6 +199,34 @@ mod tests {
             state.apply_service_event(&ServiceEvent::Lifecycle(Lifecycle::GameStarted));
         }
         assert_eq!(state.activity.len(), MAX_ACTIVITY);
+    }
+
+    /// A stopped worker still has to change the state the UI derives from it: the connection is no
+    /// longer observable, an in-flight test cannot still be in flight, and the banner says what
+    /// happened instead of the window quietly claiming the old state.
+    #[test]
+    fn a_stopped_worker_ends_the_wait_and_stops_reporting_a_live_service() {
+        let mut state = AppState::new(AppSettings::default(), WebhookStatus::default());
+        state.settings.auto_accept_enabled = true;
+        state.apply_service_event(&ServiceEvent::Connection { connected: true });
+        state.webhook_testing = true;
+
+        state.apply_service_event(&ServiceEvent::Stopped {
+            message: "The League service stopped unexpectedly (boom).".to_string(),
+        });
+
+        assert_eq!(state.connection, ConnectionStatus::Disconnected);
+        assert_eq!(
+            state.summary(),
+            "League offline",
+            "no longer claims to be active"
+        );
+        assert_eq!(state.ready_check, ReadyCheckStatus::Error);
+        assert!(!state.webhook_testing, "nothing can still be in flight");
+        assert_eq!(
+            state.settings_error.as_deref(),
+            Some("The League service stopped unexpectedly (boom).")
+        );
     }
 
     #[test]
