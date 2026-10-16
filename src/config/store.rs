@@ -502,6 +502,15 @@ fn restricted_launch_note() -> Option<&'static str> {
 
 /// The user-facing explanation when settings could not be written.
 pub fn save_error_message(path: &Path, error: &StoreError) -> String {
+    // A refused protection fails before any write is attempted, so this branch must not send the
+    // user to a log that was never written. The webhook is the part that could not be stored.
+    if matches!(error, StoreError::Secret(_)) {
+        return format!(
+            "Settings could not be saved to {} — {error}. Your changes apply until the app closes, \
+             and the Discord webhook already stored is still the one in use.",
+            path.display()
+        );
+    }
     let note = restricted_launch_note().unwrap_or("");
     format!(
         "Settings could not be saved to {} — {error}. Your changes apply until the app closes, and \
@@ -1152,5 +1161,16 @@ mod tests {
         assert!(unprotected.contains("could not be saved"), "{unprotected}");
         assert!(unprotected.contains("nothing was written"), "{unprotected}");
         assert!(!unprotected.contains("settings-error.log"), "{unprotected}");
+    }
+
+    /// A refused protection fails before any write is attempted, so the ordinary settings banner must
+    /// not promise a diagnostics log that was never written either.
+    #[test]
+    fn the_settings_error_message_does_not_promise_a_log_when_nothing_was_written() {
+        let message =
+            save_error_message(Path::new("settings.json"), &StoreError::Secret(SecretError));
+        assert!(message.contains("could not be saved"), "{message}");
+        assert!(message.contains("still the one in use"), "{message}");
+        assert!(!message.contains("settings-error.log"), "{message}");
     }
 }
