@@ -33,7 +33,7 @@ use crate::platform::window as platform_window;
 use crate::ui::components::{
     Button, ButtonVariant, Divider, Elevation, Row, SettingsGroup, Surface, Toggle,
 };
-use crate::ui::decisions::{self, ToggleSetting, WebhookChange};
+use crate::ui::decisions::{self, ToggleSetting, WebhookChange, WebhookTestStart};
 use crate::ui::shell::{PageHeader, Screen, Sidebar, TitleBar};
 use crate::ui::theme::{self, Appearance, SurfaceTreatment, Theme};
 
@@ -650,10 +650,17 @@ impl Dashboard {
                         return;
                     }
                     this.state.webhook_test = None;
-                    this.state.webhook_testing = true;
-                    let _ = this
-                        .notifications
-                        .try_send(NotificationCommand::TestWebhook);
+                    // A request that cannot be queued means no worker is left to answer it, so the
+                    // button must not sit on "Sending…" waiting for a result that cannot come.
+                    match decisions::webhook_test_start(
+                        this.notifications
+                            .try_send(NotificationCommand::TestWebhook),
+                    ) {
+                        WebhookTestStart::Queued => this.state.webhook_testing = true,
+                        WebhookTestStart::Unavailable(message) => {
+                            this.state.settings_error = Some(message);
+                        }
+                    }
                     cx.notify();
                 })),
             )

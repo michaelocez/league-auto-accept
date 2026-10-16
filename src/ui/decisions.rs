@@ -1,12 +1,12 @@
-//! Pure decision logic behind the view's event handlers.
+//! GPUI-free decision logic behind the view's event handlers.
 //!
 //! No GPUI, no entities and no borrows: each function maps the state and the outcome it is given to
 //! the values the view should adopt. That is what makes the handler decisions testable without a
-//! window — including the webhook path whose original shape held a `RefCell` borrow across a `match`
-//! and closed the whole application.
+//! window — including the webhook path whose original shape held a `RefCell` borrow across a `match`.
 
 use serde_json::{json, Value};
 
+use crate::app::service::NotificationCommand;
 use crate::config::settings::AppSettings;
 use crate::config::store::{webhook_error_message, StoreError};
 use crate::notifications::discord::WebhookStatus;
@@ -79,67 +79,85 @@ pub fn webhook_change(action: &str, result: Result<WebhookStatus, StoreError>) -
     }
 }
 
+/// What the Test Webhook button does with the result of queueing its request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WebhookTestStart {
+    /// The request is queued; the button may show a test in flight.
+    Queued,
+    /// Nothing is listening any more, so the button must not show a test in flight that can never
+    /// finish.
+    Unavailable(String),
+}
+
+/// The decision behind the Test Webhook button.
+///
+/// The sender reports whether a worker is still listening, so a dead notification channel becomes a
+/// message the user can act on instead of a button stuck on "Sending…".
+pub fn webhook_test_start(
+    result: Result<(), async_channel::TrySendError<NotificationCommand>>,
+) -> WebhookTestStart {
+    match result {
+        Ok(()) => WebhookTestStart::Queued,
+        Err(_) => WebhookTestStart::Unavailable(
+            "The background service is not running, so a test webhook cannot be sent. Restart \
+             League Auto Accept to reconnect."
+                .to_string(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::settings::merge_settings;
 
-    /// Every toggle row must move exactly the one setting it names, or a click on one switch would
-    /// silently change another.
+    /// Every toggle row must read the setting it names. The event flags start with mixed values on
+    /// purpose: with all three `false`, as they are by default, an arm reading the wrong field would
+    /// still produce the right patch and the test would pass.
     #[test]
-    fn each_toggle_patch_flips_exactly_its_own_setting() {
-        let before = AppSettings::default();
+    fn each_toggle_patch_flips_only_the_field_it_names() {
+        let before = AppSettings {
+            notification_events: crate::config::settings::NotificationEvents {
+                queue_popped: true,
+                auto_accepted: false,
+                game_started: true,
+            },
+            ..AppSettings::default()
+        };
 
-        let cases = [
-            (
-                ToggleSetting::DiscordNotifications,
-                "discordNotificationsEnabled",
-                toggle_patch(ToggleSetting::DiscordNotifications, &before),
-            ),
-            (
-                ToggleSetting::QueuePopped,
-                "queuePopped",
-                toggle_patch(ToggleSetting::QueuePopped, &before),
-            ),
-            (
-                ToggleSetting::AutoAccepted,
-                "autoAccepted",
-                toggle_patch(ToggleSetting::AutoAccepted, &before),
-            ),
-            (
-                ToggleSetting::GameStarted,
-                "gameStarted",
-                toggle_patch(ToggleSetting::GameStarted, &before),
-            ),
-            (
-                ToggleSetting::MinimizeToTray,
-                "minimizeToTray",
-                toggle_patch(ToggleSetting::MinimizeToTray, &before),
-            ),
-        ];
+        assert_eq!(
+            toggle_patch(ToggleSetting::DiscordNotifications, &before),
+            json!({ "discordNotificationsEnabled": true })
+        );
+        assert_eq!(
+            toggle_patch(ToggleSetting::QueuePopped, &before),
+            json!({ "notificationEvents": { "queuePopped": false } })
+        );
+        assert_eq!(
+            toggle_patch(ToggleSetting::AutoAccepted, &before),
+            json!({ "notificationEvents": { "autoAccepted": true } })
+        );
+        assert_eq!(
+            toggle_patch(ToggleSetting::GameStarted, &before),
+            json!({ "notificationEvents": { "gameStarted": false } })
+        );
+        assert_eq!(
+            toggle_patch(ToggleSetting::MinimizeToTray, &before),
+            json!({ "minimizeToTray": false })
+        );
 
-        for (setting, key, patch) in cases {
-            assert!(
-                patch.to_string().contains(key),
-                "{setting:?} must address {key}: {patch}"
-            );
-            let after = merge_settings(&before, &patch);
-            let changed = [
-                after.schema_version != before.schema_version,
-                after.auto_accept_enabled != before.auto_accept_enabled,
-                after.discord_notifications_enabled != before.discord_notifications_enabled,
-                after.discord_mentions != before.discord_mentions,
-                after.notification_events != before.notification_events,
-                after.notification_messages != before.notification_messages,
-                after.minimize_to_tray != before.minimize_to_tray,
-                after.theme_mode != before.theme_mode,
-                after.window_backdrop != before.window_backdrop,
-            ]
-            .into_iter()
-            .filter(|changed| *changed)
-            .count();
-            assert_eq!(changed, 1, "{setting:?} must flip one setting: {patch}");
-        }
+        // The patch has to reach the setting, not just look right: a nested row must flip its own
+        // field and leave its siblings as they were.
+        let after = merge_settings(&before, &toggle_patch(ToggleSetting::AutoAccepted, &before));
+        assert!(after.notification_events.auto_accepted);
+        assert_eq!(
+            after.notification_events.queue_popped,
+            before.notification_events.queue_popped
+        );
+        assert_eq!(
+            after.notification_events.game_started,
+            before.notification_events.game_started
+        );
     }
 
     /// The stored value and the patch are the same decision, so they cannot drift apart.
@@ -170,8 +188,8 @@ mod tests {
         );
     }
 
-    /// The shape behind the removal crash: a refused change must never hand the view a status to
-    /// adopt, or the window could show — and the store could keep — a value that was never stored.
+    /// A refused change must never hand the view a status to adopt: showing or keeping a value the
+    /// store refused is what the crashing shape used to do.
     #[test]
     fn a_refused_webhook_change_carries_no_status() {
         for error in [
@@ -192,18 +210,43 @@ mod tests {
         }
     }
 
+    /// The refusal text comes from the shared store helper, with the action the view was performing;
+    /// the wording itself is asserted where it lives, in `config::store`.
     #[test]
-    fn the_refusal_message_matches_the_kind_of_refusal() {
+    fn the_refusal_text_is_the_shared_helpers_text_for_the_action() {
         let invalid = refusal("saved", StoreError::InvalidWebhook);
-        assert!(
-            invalid.contains("not a valid Discord webhook URL"),
-            "{invalid}"
-        );
         assert!(!invalid.contains("settings-error.log"), "{invalid}");
 
         let refused = refusal("removed", StoreError::Io(std::io::Error::other("denied")));
         assert!(refused.contains("could not be removed"), "{refused}");
-        assert!(refused.contains("settings-error.log"), "{refused}");
+    }
+
+    /// A dead notification channel must not leave the Test Webhook button on "Sending…" forever.
+    #[test]
+    fn a_test_webhook_with_no_worker_behind_it_is_reported_instead_of_queued() {
+        let (tx, rx) = async_channel::unbounded::<NotificationCommand>();
+        drop(rx);
+
+        match webhook_test_start(tx.try_send(NotificationCommand::TestWebhook)) {
+            WebhookTestStart::Unavailable(message) => {
+                assert!(message.contains("not running"), "{message}");
+            }
+            WebhookTestStart::Queued => panic!("nothing is listening, so nothing can be queued"),
+        }
+    }
+
+    #[test]
+    fn a_test_webhook_with_a_live_channel_is_queued() {
+        let (tx, rx) = async_channel::unbounded::<NotificationCommand>();
+
+        assert_eq!(
+            webhook_test_start(tx.try_send(NotificationCommand::TestWebhook)),
+            WebhookTestStart::Queued
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(NotificationCommand::TestWebhook)
+        ));
     }
 
     fn refusal(action: &str, error: StoreError) -> String {
