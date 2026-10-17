@@ -66,11 +66,12 @@ Settings are stored as JSON at:
 %APPDATA%\League Auto Accept\settings.json
 ```
 
-The only secret is the Discord webhook URL. It is encrypted with the OS codec (DPAPI on Windows)
-where available, written only through the settings store's typed, validating setter, and read only
-by the notification sender. It is never part of application state, the tray or the rendered UI: the
-window shows only whether a webhook is configured and its host. Your theme and window backdrop are
-stored here too, so they are restored on next launch.
+The only secret is the Discord webhook URL. It is protected with the OS codec (DPAPI on Windows),
+written only through the settings store's typed, validating setter, and read only by the notification
+sender. If the OS refuses to protect it, the change is rejected and the webhook already stored stays
+in use — the URL is never written in the clear. It is never part of application state, the tray or the
+rendered UI: the window shows only whether a webhook is configured and its host. Your theme and window
+backdrop are stored here too, so they are restored on next launch.
 
 The app must be able to write that file. If the write is refused — the directory is read-only, or the
 app was started from a sandboxed/low-integrity context — the Settings and Notifications pages show a
