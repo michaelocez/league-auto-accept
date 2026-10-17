@@ -1,6 +1,6 @@
 [package]
 name = "league-auto-accept"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2021"
 # The dependency graph declares MSRVs up to 1.90 (`tray-icon` and friends), so this is the real floor.
 rust-version = "1.90"
