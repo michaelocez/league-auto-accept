@@ -1,7 +1,8 @@
 //! Secret storage for the Discord webhook URL.
 //!
-//! The webhook URL is the only secret. On Windows it is protected with DPAPI
-//! (`CryptProtectData`); if protection is unavailable it falls back to a plainly-stored value.
+//! The webhook URL is the only secret. On Windows it is protected with DPAPI (`CryptProtectData`);
+//! a value the OS refuses to protect is never stored, so the secret is not silently downgraded to
+//! cleartext — the caller is told instead.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -13,9 +14,22 @@ pub struct StoredSecret {
     pub value: String,
 }
 
+/// A value the codec could not protect for storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SecretError;
+
+impl std::fmt::Display for SecretError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the operating system refused to protect the value")
+    }
+}
+
+impl std::error::Error for SecretError {}
+
 /// Encodes/decodes the webhook secret. Injectable so tests can use a deterministic codec.
 pub trait SecretCodec: Send + Sync {
-    fn encode(&self, value: &str) -> StoredSecret;
+    /// Protects `value` for storage, or fails rather than handing back a cleartext value.
+    fn encode(&self, value: &str) -> Result<StoredSecret, SecretError>;
     fn decode(&self, secret: &StoredSecret) -> String;
 }
 
@@ -23,11 +37,11 @@ pub trait SecretCodec: Send + Sync {
 pub struct PlainSecretCodec;
 
 impl SecretCodec for PlainSecretCodec {
-    fn encode(&self, value: &str) -> StoredSecret {
-        StoredSecret {
+    fn encode(&self, value: &str) -> Result<StoredSecret, SecretError> {
+        Ok(StoredSecret {
             protection: "plain".into(),
             value: value.to_string(),
-        }
+        })
     }
 
     fn decode(&self, secret: &StoredSecret) -> String {
@@ -53,23 +67,8 @@ pub struct DpapiSecretCodec;
 
 #[cfg(windows)]
 impl SecretCodec for DpapiSecretCodec {
-    fn encode(&self, value: &str) -> StoredSecret {
-        if value.is_empty() {
-            return StoredSecret {
-                protection: "os".into(),
-                value: String::new(),
-            };
-        }
-        match dpapi::protect(value.as_bytes()) {
-            Some(bytes) => StoredSecret {
-                protection: "os".into(),
-                value: base64::engine::general_purpose::STANDARD.encode(bytes),
-            },
-            None => StoredSecret {
-                protection: "plain".into(),
-                value: value.to_string(),
-            },
-        }
+    fn encode(&self, value: &str) -> Result<StoredSecret, SecretError> {
+        Self::encode_protected(value, dpapi::protect)
     }
 
     fn decode(&self, secret: &StoredSecret) -> String {
@@ -86,6 +85,31 @@ impl SecretCodec for DpapiSecretCodec {
         match dpapi::unprotect(&data) {
             Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             None => String::new(),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl DpapiSecretCodec {
+    /// Encodes through an injectable protector, so the refusal path is testable without making the
+    /// real DPAPI call fail.
+    fn encode_protected(
+        value: &str,
+        protect: impl Fn(&[u8]) -> Option<Vec<u8>>,
+    ) -> Result<StoredSecret, SecretError> {
+        // An empty webhook is not a secret, so it needs no protection and can always be removed.
+        if value.is_empty() {
+            return Ok(StoredSecret {
+                protection: "os".into(),
+                value: String::new(),
+            });
+        }
+        match protect(value.as_bytes()) {
+            Some(bytes) => Ok(StoredSecret {
+                protection: "os".into(),
+                value: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+            None => Err(SecretError),
         }
     }
 }
@@ -129,9 +153,7 @@ mod dpapi {
         if ok == 0 {
             return None;
         }
-        let bytes = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
-        unsafe { LocalFree(out.pbData as *mut c_void) };
-        Some(bytes)
+        take_blob(out)
     }
 
     pub fn unprotect(data: &[u8]) -> Option<Vec<u8>> {
@@ -150,9 +172,35 @@ mod dpapi {
         if ok == 0 {
             return None;
         }
-        let bytes = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
-        unsafe { LocalFree(out.pbData as *mut c_void) };
-        Some(bytes)
+        take_blob(out)
+    }
+
+    /// Copies and frees a DPAPI output blob, rejecting the null or zero-length case.
+    ///
+    /// `std::slice::from_raw_parts` requires a non-null pointer even for an empty slice, so a blob
+    /// the API reports without a buffer must not reach it.
+    fn take_blob(out: CRYPT_INTEGER_BLOB) -> Option<Vec<u8>> {
+        let bytes = if out.pbData.is_null() || out.cbData == 0 {
+            None
+        } else {
+            // SAFETY: `out` was written by a successful DPAPI call, so `pbData` points at `cbData`
+            // bytes the caller owns; they are copied before the buffer is freed exactly once below.
+            Some(unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec())
+        };
+        if !out.pbData.is_null() {
+            unsafe { LocalFree(out.pbData as *mut c_void) };
+        }
+        bytes
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_null_or_empty_output_blob_is_rejected_instead_of_sliced() {
+            assert!(take_blob(empty_blob()).is_none());
+        }
     }
 }
 
@@ -165,7 +213,7 @@ mod tests {
     #[test]
     fn plain_codec_round_trips() {
         let codec = PlainSecretCodec;
-        let stored = codec.encode(SAMPLE);
+        let stored = codec.encode(SAMPLE).expect("plain storage cannot fail");
         assert_eq!(stored.protection, "plain");
         assert_eq!(codec.decode(&stored), SAMPLE);
     }
@@ -174,10 +222,27 @@ mod tests {
     #[test]
     fn dpapi_round_trips_and_does_not_store_plaintext() {
         let codec = DpapiSecretCodec;
-        let stored = codec.encode(SAMPLE);
+        let stored = codec
+            .encode(SAMPLE)
+            .expect("DPAPI protects in a test process");
         assert_eq!(stored.protection, "os");
         assert!(!stored.value.contains("discord.com"));
         assert_eq!(codec.decode(&stored), SAMPLE);
+    }
+
+    /// The defect this guards: a failed `CryptProtectData` used to be reported as `protection:
+    /// "plain"` with the URL in the clear. Refusing is the only safe answer.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_protection_is_an_error_rather_than_cleartext() {
+        let refused = DpapiSecretCodec::encode_protected(SAMPLE, |_| None);
+        assert_eq!(refused, Err(SecretError));
+
+        // An empty value is not a secret, so removal still works without touching DPAPI.
+        let empty = DpapiSecretCodec::encode_protected("", |_| None)
+            .expect("the empty webhook needs no protection");
+        assert_eq!(empty.protection, "os");
+        assert!(empty.value.is_empty());
     }
 
     #[cfg(windows)]

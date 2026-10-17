@@ -80,18 +80,6 @@ impl WebhookSecret {
     }
 }
 
-impl From<&str> for WebhookSecret {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<String> for WebhookSecret {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
 impl std::fmt::Debug for WebhookSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("WebhookSecret(<redacted>)")
