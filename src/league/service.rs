@@ -21,9 +21,19 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Observable output of the service. The app maps these onto application state / notifications.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceEvent {
-    Connection { connected: bool },
-    ReadyCheck { status: Status, message: String },
+    Connection {
+        connected: bool,
+    },
+    ReadyCheck {
+        status: Status,
+        message: String,
+    },
     Lifecycle(Lifecycle),
+    /// The worker that produces these events has stopped and will not report again. Sent by the app
+    /// layer that supervises it, so the UI can stop waiting on a channel nothing feeds any more.
+    Stopped {
+        message: String,
+    },
 }
 
 enum MachineInput {
