@@ -23,6 +23,8 @@ pub struct TrayPopup {
     dashboard: Entity<Dashboard>,
     tx: Sender<AppEvent>,
     focus_handle: FocusHandle,
+    /// GPUI subscriptions are RAII — dropping one unsubscribes it — so the vec is held for the
+    /// popup's lifetime to keep the state observation and the dismiss-on-blur active.
     #[allow(dead_code)]
     subscriptions: Vec<Subscription>,
 }
