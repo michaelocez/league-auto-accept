@@ -2,9 +2,9 @@
 //!
 //! Writes are atomic (temp file + rename), a malformed file is preserved as `settings.json.invalid`
 //! before defaults replace it, and a refused write is explained through a bounded diagnostics log.
-//! The webhook's own persistence lives in the [`webhook`] child module — a child so the store's
-//! fields stay private — and the Windows token query the diagnostics use lives in
-//! [`crate::platform::integrity`].
+//! The webhook's own persistence lives in a private `webhook` child module — a child so the store's
+//! fields stay private — and the Windows token query the diagnostics use lives in the crate-private
+//! `platform::integrity` module.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};

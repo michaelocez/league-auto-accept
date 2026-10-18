@@ -1,6 +1,6 @@
 //! The Discord webhook's own persistence: the store's only secret.
 //!
-//! A child module of [`super`] on purpose — the store's fields stay private while the webhook code
+//! A child module of the store on purpose — the store's fields stay private while the webhook code
 //! owns them — so the public paths (`SettingsStore::set_webhook`, `webhook_error_message`) do not
 //! move.
 
