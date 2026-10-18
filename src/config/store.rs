@@ -1,20 +1,26 @@
-//! Settings persistence: atomic load/save with an encrypted webhook secret.
+//! Settings persistence: atomic load/save for the typed settings and their secret.
 //!
 //! Writes are atomic (temp file + rename), a malformed file is preserved as `settings.json.invalid`
-//! before defaults replace it, and the webhook secret is stored as `{protection, value}` separate
-//! from the plain settings. The secret is owned here (and in the shared handle the notification
-//! sender reads); it is never part of [`AppSettings`], so it cannot reach application state, the
-//! tray or the UI.
+//! before defaults replace it, and a refused write is explained through a bounded diagnostics log.
+//! The webhook's own persistence lives in the [`webhook`] child module — a child so the store's
+//! fields stay private — and the Windows token query the diagnostics use lives in
+//! [`crate::platform::integrity`].
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
 
-use crate::notifications::discord::{parse_discord_webhook_url, WebhookSecret, WebhookStatus};
+use crate::notifications::discord::WebhookSecret;
+use crate::platform::integrity::process_integrity_level;
 
-use super::secret::{default_secret_codec, SecretCodec, SecretError, StoredSecret};
+use super::secret::{default_secret_codec, SecretCodec, SecretError};
 use super::settings::{merge_settings, normalize_settings, AppSettings};
+
+mod webhook;
+
+use webhook::stored_secret;
+pub use webhook::webhook_error_message;
 
 const SETTINGS_FILE_NAME: &str = "settings.json";
 
@@ -178,65 +184,9 @@ impl SettingsStore {
         Ok(self.snapshot())
     }
 
-    /// Replaces the Discord webhook. The only path by which a webhook enters the store, so the URL
-    /// is validated here rather than trusted from the UI.
-    ///
-    /// The file is written before the shared handle changes, so a refused save leaves the
-    /// notification sender and the UI on the secret that is actually stored instead of on one that
-    /// exists only in memory and disappears at the next launch.
-    ///
-    /// On success the status that is really stored is returned, so a caller that shares the store
-    /// can refresh what it shows from one call instead of re-entering the store while its own
-    /// mutable borrow is still alive.
-    pub fn set_webhook(&mut self, url: &str) -> Result<WebhookStatus, StoreError> {
-        let url = url.trim();
-        if !url.is_empty() && parse_discord_webhook_url(url).is_none() {
-            return Err(StoreError::InvalidWebhook);
-        }
-        self.commit_webhook(WebhookSecret::new(url))
-    }
-
-    /// Removes the stored Discord webhook, under the same write-first rule as
-    /// [`SettingsStore::set_webhook`].
-    pub fn clear_webhook(&mut self) -> Result<WebhookStatus, StoreError> {
-        self.commit_webhook(WebhookSecret::default())
-    }
-
-    /// Persists `secret`, adopts it only once the file has accepted it, and reports the stored
-    /// status.
-    ///
-    /// Answering both halves of a change — what was written and what should now be shown — is what
-    /// lets a caller hold a single borrow: a `RefCell`-shared store panics with
-    /// `already mutably borrowed` if it is read again before the change's borrow has ended, and that
-    /// panic takes the whole process down.
-    fn commit_webhook(&mut self, secret: WebhookSecret) -> Result<WebhookStatus, StoreError> {
-        self.save_with(&secret)?;
-        self.replace_webhook(secret);
-        Ok(self.webhook_status())
-    }
-
-    /// Secret-free webhook status, suitable for application state and the UI.
-    pub fn webhook_status(&self) -> WebhookStatus {
-        self.read_webhook().status()
-    }
-
     /// Returns a clone of the current settings (no internal state is leaked).
     pub fn snapshot(&self) -> AppSettings {
         self.settings.clone()
-    }
-
-    fn read_webhook(&self) -> WebhookSecret {
-        match self.webhook.read() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
-    }
-
-    fn replace_webhook(&self, secret: WebhookSecret) {
-        match self.webhook.write() {
-            Ok(mut guard) => *guard = secret,
-            Err(poisoned) => *poisoned.into_inner() = secret,
-        }
     }
 
     fn try_load(&mut self) -> Result<(), StoreError> {
@@ -429,56 +379,6 @@ fn contextual_io_error(step: &str, path: &Path, error: &std::io::Error) -> std::
     )
 }
 
-/// The integrity level of this process, as the last sub-authority of its integrity SID.
-///
-/// `0x1000` is low, `0x2000` is the level normal user programs run at.
-fn process_integrity_level() -> Option<u32> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::Security::{
-        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
-        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-    };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-    // Word-aligned because the label starts with pointers, and far larger than a label plus a SID.
-    let mut buffer = [0u64; 32];
-    let mut needed = 0u32;
-    let mut token = std::ptr::null_mut();
-
-    // SAFETY: the token handle is closed on every path that opened it, and the API is given a buffer
-    // that is large enough for the label it writes, correctly aligned for the pointers inside it.
-    unsafe {
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-            return None;
-        }
-        let ok = GetTokenInformation(
-            token,
-            TokenIntegrityLevel,
-            buffer.as_mut_ptr().cast(),
-            std::mem::size_of_val(&buffer) as u32,
-            &mut needed,
-        );
-        let level = if ok == 0 {
-            None
-        } else {
-            let label = &*(buffer.as_ptr().cast::<TOKEN_MANDATORY_LABEL>());
-            let count = GetSidSubAuthorityCount(label.Label.Sid);
-            if count.is_null() {
-                None
-            } else {
-                let last = GetSidSubAuthority(label.Label.Sid, *count as u32 - 1);
-                if last.is_null() {
-                    None
-                } else {
-                    Some(*last)
-                }
-            }
-        };
-        CloseHandle(token);
-        level
-    }
-}
-
 /// A sentence naming a lowered integrity level, which is a cause of a refused write that a log file
 /// may itself be unable to record.
 ///
@@ -519,30 +419,6 @@ pub fn save_error_message(path: &Path, error: &StoreError) -> String {
     )
 }
 
-/// The user-facing explanation when a webhook change could not be saved.
-///
-/// `action` is how the attempt reads in a sentence ("saved", "removed"). The message must not imply
-/// that the change took effect: when a write is refused the store keeps the secret it already had.
-pub fn webhook_error_message(action: &str, error: &StoreError) -> String {
-    if matches!(error, StoreError::InvalidWebhook) {
-        return "That is not a valid Discord webhook URL, so the webhook was left as it was."
-            .to_string();
-    }
-    // A refused protection fails before any write is attempted, so this branch must not send the
-    // user to a log that was never written.
-    if matches!(error, StoreError::Secret(_)) {
-        return format!(
-            "The Discord webhook could not be {action} — {error}. The webhook already stored is \
-             still the one in use, and nothing was written."
-        );
-    }
-    let note = restricted_launch_note().unwrap_or("");
-    format!(
-        "The Discord webhook could not be {action} — {error}. The webhook already stored is still \
-         the one in use, and the app tried to record why in settings-error.log.{note}"
-    )
-}
-
 /// Default per-user settings directory (`%APPDATA%\League Auto Accept`).
 pub fn default_settings_directory() -> PathBuf {
     std::env::var_os("APPDATA")
@@ -551,37 +427,23 @@ pub fn default_settings_directory() -> PathBuf {
         .join("League Auto Accept")
 }
 
-fn stored_secret(value: &Value) -> Option<StoredSecret> {
-    let object = value.as_object()?;
-    let protection = object.get("protection")?.as_str()?;
-    if protection != "os" && protection != "plain" {
-        return None;
-    }
-    let value = object.get("value")?.as_str()?;
-    Some(StoredSecret {
-        protection: protection.to_string(),
-        value: value.to_string(),
-    })
-}
-
+/// Fixtures shared by this module's tests and the webhook module's.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::secret::{SecretError, StoredSecret};
+pub(super) mod test_support {
     use base64::Engine as _;
-    use serde_json::json;
-    use tempfile::tempdir;
+
+    use crate::config::secret::{SecretCodec, SecretError, StoredSecret};
 
     /// A valid Discord webhook URL: 17-digit id + 40-character token.
-    const SAMPLE_URL: &str =
+    pub const SAMPLE_URL: &str =
         "https://discord.com/api/webhooks/12345678901234567/tttttttttttttttttttttttttttttttttttttttt";
 
     /// A second valid webhook, used to prove a refused change leaves the *first* one in place.
-    const OTHER_URL: &str =
+    pub const OTHER_URL: &str =
         "https://discord.com/api/webhooks/22345678901234567/uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu";
 
     /// Deterministic codec that base64-wraps the secret so the plaintext never appears in the file.
-    struct FakeCodec;
+    pub struct FakeCodec;
 
     impl SecretCodec for FakeCodec {
         fn encode(&self, value: &str) -> Result<StoredSecret, SecretError> {
@@ -604,7 +466,7 @@ mod tests {
 
     /// A codec that refuses to protect a real value, standing in for a failed `CryptProtectData`.
     /// An empty webhook is not a secret, so it still persists — matching the real codec.
-    struct RefusingCodec;
+    pub struct RefusingCodec;
 
     impl SecretCodec for RefusingCodec {
         fn encode(&self, value: &str) -> Result<StoredSecret, SecretError> {
@@ -621,6 +483,15 @@ mod tests {
             secret.value.clone()
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::FakeCodec;
+    use super::*;
+    use crate::config::secret::SecretError;
+    use serde_json::json;
+    use tempfile::tempdir;
 
     #[test]
     fn a_refused_replace_is_reported_and_leaves_no_temporary_behind() {
@@ -650,18 +521,6 @@ mod tests {
         assert!(log.contains("can create file in directory=true"));
         assert!(log.contains("can open existing file for write=false"));
         assert!(!root.path().join("settings-write-probe.tmp").exists());
-    }
-
-    #[test]
-    fn the_process_runs_at_a_plausible_integrity_level() {
-        // Exercises the token query behind the banner's restricted-launch note. A plausible level —
-        // low through system — means the integrity SID was read correctly rather than through a
-        // stale pointer, which is the failure this check exists to rule out.
-        let level = process_integrity_level().expect("the process token has an integrity level");
-        assert!(
-            (0x1000..=0x4000).contains(&level),
-            "implausible integrity level {level:#x}"
-        );
     }
 
     #[test]
@@ -738,90 +597,6 @@ mod tests {
         assert!(
             !backup.exists(),
             "the backup is not reused and does not outlive the successful replacement"
-        );
-    }
-
-    #[test]
-    fn a_settings_patch_cannot_write_the_webhook_secret() {
-        let root = tempdir().unwrap();
-        let webhook = Arc::new(RwLock::new(WebhookSecret::default()));
-        let mut store =
-            SettingsStore::with_webhook(root.path(), Box::new(FakeCodec), webhook.clone());
-        store.load().unwrap();
-
-        store
-            .update(&json!({ "discordWebhookUrl": SAMPLE_URL }))
-            .unwrap();
-
-        assert!(!store.webhook_status().configured);
-        assert!(!webhook.read().unwrap().is_configured());
-        let stored = std::fs::read_to_string(root.path().join("settings.json")).unwrap();
-        assert!(!stored.contains("discord.com"));
-    }
-
-    #[test]
-    fn the_typed_setter_validates_persists_and_reloads_the_webhook() {
-        let root = tempdir().unwrap();
-        let webhook = Arc::new(RwLock::new(WebhookSecret::default()));
-        let mut store =
-            SettingsStore::with_webhook(root.path(), Box::new(FakeCodec), webhook.clone());
-        store.load().unwrap();
-        assert_eq!(store.webhook_status().label(), "Not configured");
-
-        for invalid in [
-            "not a url",
-            "http://discord.com/api/webhooks/1/t",
-            "https://evil.test/api/webhooks/1/t",
-        ] {
-            assert!(
-                matches!(store.set_webhook(invalid), Err(StoreError::InvalidWebhook)),
-                "{invalid:?} should be rejected"
-            );
-        }
-        assert!(!store.webhook_status().configured);
-
-        store.set_webhook(SAMPLE_URL).unwrap();
-        assert!(store.webhook_status().configured);
-        assert_eq!(store.webhook_status().host.as_deref(), Some("discord.com"));
-        assert_eq!(webhook.read().unwrap().expose(), SAMPLE_URL);
-
-        // A fresh store picks the secret up from disk, and the plaintext never appears there.
-        let reloaded_handle = Arc::new(RwLock::new(WebhookSecret::default()));
-        let reloaded =
-            SettingsStore::with_webhook(root.path(), Box::new(FakeCodec), reloaded_handle.clone())
-                .load()
-                .unwrap();
-        assert_eq!(reloaded_handle.read().unwrap().expose(), SAMPLE_URL);
-        assert!(!format!("{reloaded:?}").contains("discord.com"));
-
-        let stored = std::fs::read_to_string(root.path().join("settings.json")).unwrap();
-        assert!(!stored.contains("discord.com"));
-        assert!(stored.contains("\"protection\": \"os\""));
-
-        let mut store = SettingsStore::with_webhook(root.path(), Box::new(FakeCodec), webhook);
-        store.load().unwrap();
-        store.clear_webhook().unwrap();
-        assert!(!store.webhook_status().configured);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_real_codec_stores_the_webhook_protected_on_windows() {
-        let root = tempdir().unwrap();
-        let mut store = SettingsStore::with_directory(root.path());
-        store.load().unwrap();
-        store.set_webhook(SAMPLE_URL).unwrap();
-        assert_eq!(store.webhook_status().host.as_deref(), Some("discord.com"));
-
-        let stored = std::fs::read_to_string(root.path().join("settings.json")).unwrap();
-        assert!(!stored.contains(SAMPLE_URL));
-        assert!(stored.contains("\"protection\": \"os\""));
-
-        let mut reloaded = SettingsStore::with_directory(root.path());
-        reloaded.load().unwrap();
-        assert_eq!(
-            reloaded.webhook_status().host.as_deref(),
-            Some("discord.com")
         );
     }
 
@@ -965,202 +740,6 @@ mod tests {
             .unwrap();
         assert!(reloaded.auto_accept_enabled);
         assert_eq!(reloaded.theme_mode, ThemeMode::Light);
-    }
-
-    /// A refused webhook save must not be adopted: the sender and the UI have to stay on the secret
-    /// that is really stored, or the change appears to work and then vanishes at the next launch.
-    #[cfg(windows)]
-    #[test]
-    fn a_refused_webhook_save_keeps_the_stored_secret() {
-        let root = tempdir().unwrap();
-        let webhook = Arc::new(RwLock::new(WebhookSecret::default()));
-        let mut store =
-            SettingsStore::with_webhook(root.path(), Box::new(FakeCodec), webhook.clone());
-        store.load().unwrap();
-
-        let path = root.path().join(SETTINGS_FILE_NAME);
-        let original = std::fs::metadata(&path).unwrap().permissions();
-        let mut read_only = original.clone();
-        read_only.set_readonly(true);
-        std::fs::set_permissions(&path, read_only).unwrap();
-
-        let error = store
-            .set_webhook(SAMPLE_URL)
-            .expect_err("a read-only settings file cannot be replaced");
-        assert!(matches!(error, StoreError::Io(_)));
-        assert!(
-            !store.webhook_status().configured,
-            "the status must keep describing the stored webhook"
-        );
-        assert!(
-            !webhook.read().unwrap().is_configured(),
-            "the notification sender must keep the stored secret"
-        );
-        assert!(!std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("discord.com"));
-
-        std::fs::set_permissions(&path, original).unwrap();
-
-        // Once the file accepts a write again the change is persisted and adopted together.
-        store.set_webhook(SAMPLE_URL).unwrap();
-        assert!(store.webhook_status().configured);
-        assert!(webhook.read().unwrap().is_configured());
-    }
-
-    /// Removing a webhook is a write too, so the same rule applies in reverse.
-    #[cfg(windows)]
-    #[test]
-    fn a_refused_webhook_removal_keeps_the_stored_secret() {
-        let root = tempdir().unwrap();
-        let webhook = Arc::new(RwLock::new(WebhookSecret::default()));
-        let mut store =
-            SettingsStore::with_webhook(root.path(), Box::new(FakeCodec), webhook.clone());
-        store.load().unwrap();
-        store.set_webhook(SAMPLE_URL).unwrap();
-
-        let path = root.path().join(SETTINGS_FILE_NAME);
-        let original = std::fs::metadata(&path).unwrap().permissions();
-        let mut read_only = original.clone();
-        read_only.set_readonly(true);
-        std::fs::set_permissions(&path, read_only).unwrap();
-
-        let error = store
-            .clear_webhook()
-            .expect_err("a read-only settings file cannot be replaced");
-        assert!(matches!(error, StoreError::Io(_)));
-        assert!(
-            store.webhook_status().configured,
-            "a refused removal must leave the webhook in place"
-        );
-        assert!(webhook.read().unwrap().is_configured());
-
-        std::fs::set_permissions(&path, original).unwrap();
-        store.clear_webhook().unwrap();
-        assert!(!store.webhook_status().configured);
-        assert!(!webhook.read().unwrap().is_configured());
-    }
-
-    /// The defect this guards: when the OS refused to protect the webhook, the URL used to be stored
-    /// as `protection: "plain"` in the clear, silently. A refusal must instead be reported, with the
-    /// webhook already stored left as the one in use and nothing written.
-    #[test]
-    fn a_webhook_the_codec_refuses_to_protect_is_not_stored_in_cleartext() {
-        let root = tempdir().unwrap();
-        let path = root.path().join(SETTINGS_FILE_NAME);
-        // Seed a stored webhook directly, because this codec cannot encode one.
-        std::fs::write(
-            &path,
-            serde_json::to_string(&json!({
-                "discordWebhookUrl": { "protection": "os", "value": SAMPLE_URL }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let before = std::fs::read_to_string(&path).unwrap();
-
-        let webhook = Arc::new(RwLock::new(WebhookSecret::default()));
-        let mut store =
-            SettingsStore::with_webhook(root.path(), Box::new(RefusingCodec), webhook.clone());
-        store.load().unwrap();
-        assert!(
-            store.webhook_status().configured,
-            "the seeded webhook loads"
-        );
-
-        let error = store
-            .set_webhook(OTHER_URL)
-            .expect_err("a codec that refuses to protect must refuse the change");
-        assert!(matches!(error, StoreError::Secret(_)));
-
-        // Nothing was adopted and nothing was written: the stored webhook is still the first one.
-        assert_eq!(webhook.read().unwrap().expose(), SAMPLE_URL);
-        assert_eq!(store.webhook_status().host.as_deref(), Some("discord.com"));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-
-        // The banner explains the refusal without sending the user to a log that was never written.
-        let message = webhook_error_message("saved", &error);
-        assert!(message.contains("still the one in use"), "{message}");
-        assert!(!message.contains("settings-error.log"), "{message}");
-    }
-
-    /// The UI refresh after a webhook change relies on the setter answering with the status that is
-    /// really stored: it must agree with a fresh read, because the caller must not take a second
-    /// borrow of a `RefCell`-shared store to find that out.
-    #[test]
-    fn a_webhook_change_reports_the_status_that_is_really_stored() {
-        let root = tempdir().unwrap();
-        let mut store = SettingsStore::new(root.path(), Box::new(FakeCodec));
-        store.load().unwrap();
-
-        let after_save = store.set_webhook(SAMPLE_URL).unwrap();
-        assert_eq!(after_save, store.webhook_status());
-        assert!(after_save.configured);
-        assert_eq!(after_save.host.as_deref(), Some("discord.com"));
-
-        let after_clear = store.clear_webhook().unwrap();
-        assert_eq!(after_clear, store.webhook_status());
-        assert!(!after_clear.configured);
-        assert_eq!(after_clear, WebhookStatus::default());
-
-        // A refused change reports an error and stores nothing, so there is no status to report.
-        let refused = store.set_webhook("https://example.com/not-a-discord-webhook");
-        assert!(matches!(refused, Err(StoreError::InvalidWebhook)));
-        assert!(!store.webhook_status().configured);
-    }
-
-    /// Regression guard for the removal crash: the view holds the store behind `Rc<RefCell<_>>`, so
-    /// every change must be usable with a single bound borrow. Holding the borrow across the arms —
-    /// `match store.borrow_mut().clear_webhook() { Ok(()) => store.borrow()… }` — panics with
-    /// `already mutably borrowed`, which closed the application and its tray.
-    #[test]
-    fn a_shared_store_takes_one_borrow_per_webhook_change() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-
-        let root = tempdir().unwrap();
-        let cell = Rc::new(RefCell::new(SettingsStore::new(
-            root.path(),
-            Box::new(FakeCodec),
-        )));
-        cell.borrow_mut().load().unwrap();
-
-        let outcome = cell.borrow_mut().set_webhook(SAMPLE_URL);
-        let status = outcome.expect("the store accepts a valid webhook");
-        assert!(status.configured);
-        // The borrow ended with the statement above, so the store can be read again here — and is.
-        assert_eq!(cell.borrow().webhook_status(), status);
-
-        let outcome = cell.borrow_mut().clear_webhook();
-        let status = outcome.expect("the store accepts a removal");
-        assert!(!status.configured);
-        assert_eq!(cell.borrow().webhook_status(), status);
-        assert!(
-            cell.try_borrow_mut().is_ok(),
-            "no borrow may outlive a change"
-        );
-    }
-
-    #[test]
-    fn the_webhook_error_message_promises_nothing_that_did_not_happen() {
-        let refused =
-            webhook_error_message("saved", &StoreError::Io(std::io::Error::other("denied")));
-        assert!(refused.contains("could not be saved"));
-        assert!(refused.contains("still the one in use"));
-        assert!(refused.contains("settings-error.log"));
-
-        let removed =
-            webhook_error_message("removed", &StoreError::Io(std::io::Error::other("denied")));
-        assert!(removed.contains("could not be removed"));
-
-        let invalid = webhook_error_message("saved", &StoreError::InvalidWebhook);
-        assert!(invalid.contains("not a valid Discord webhook URL"));
-
-        // A refused protection never reaches the file, so its message must not promise a log entry.
-        let unprotected = webhook_error_message("saved", &StoreError::Secret(SecretError));
-        assert!(unprotected.contains("could not be saved"), "{unprotected}");
-        assert!(unprotected.contains("nothing was written"), "{unprotected}");
-        assert!(!unprotected.contains("settings-error.log"), "{unprotected}");
     }
 
     /// A refused protection fails before any write is attempted, so the ordinary settings banner must
