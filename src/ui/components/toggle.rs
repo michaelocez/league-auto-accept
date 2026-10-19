@@ -9,10 +9,10 @@ use gpui::base::StyledExt as _;
 use gpui::prelude::*;
 use gpui::{
     div, px, AnimationExt as _, AnimationPhase, App, ClickEvent, ElementId, IntoElement,
-    SpringAnimation, SpringConfig, StyleRefinement, Window,
+    SpringAnimation, StyleRefinement, Window,
 };
 
-use crate::ui::theme::Theme;
+use crate::ui::theme::{self, Theme};
 
 type ChangeHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -68,8 +68,8 @@ impl RenderOnce for Toggle {
         let t = Theme::of(cx);
         let checked = self.checked;
 
-        // A near-critically-damped spring: quick and smooth, with no visible overshoot.
-        let spring = SpringConfig::new(180.0, 26.0, 1.0);
+        // The shared spring: quick and smooth, with no visible overshoot.
+        let spring = theme::spring_snappy();
         let target = AnimationPhase(if checked { 1.0 } else { 0.0 });
         let track_anim = SpringAnimation::new(spring).to(target).with_epsilon(0.001);
         let knob_anim = SpringAnimation::new(spring).to(target).with_epsilon(0.001);

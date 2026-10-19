@@ -89,10 +89,28 @@ impl RenderOnce for Button {
         let t = Theme::of(cx);
         let disabled = self.disabled;
 
-        let (bg, fg, hover_bg) = match self.variant {
-            ButtonVariant::Primary => (t.accent, t.accent_fg, t.accent_hover),
-            ButtonVariant::Secondary => (t.surface_hover, t.text, t.surface_active),
-            ButtonVariant::Ghost => (t.surface.with_alpha(0.0), t.text_muted, t.surface_hover),
+        // Each variant names all of its states, so a press is a real step past hover rather than an
+        // opacity tweak that stacks with whatever happens to be behind the button.
+        let (bg, fg, hover_bg, active_bg, hover_fg) = match self.variant {
+            ButtonVariant::Primary => (
+                t.accent,
+                t.accent_fg,
+                t.accent_hover,
+                t.accent_active,
+                t.accent_fg,
+            ),
+            ButtonVariant::Secondary => {
+                (t.surface, t.text, t.surface_hover, t.surface_active, t.text)
+            }
+            // A ghost button carries no fill until it is pointed at, and its label steps up to full
+            // contrast at the same moment the fill appears.
+            ButtonVariant::Ghost => (
+                t.surface.with_alpha(0.0),
+                t.text_muted,
+                t.surface_hover,
+                t.surface_active,
+                t.text,
+            ),
         };
         let (px_x, py_y) = match self.size {
             ButtonSize::Sm => (theme::space_3(), theme::space_1()),
@@ -120,8 +138,8 @@ impl RenderOnce for Button {
             .when(disabled, |this| this.opacity(0.5).cursor_default())
             .when(!disabled, |this| {
                 this.cursor_pointer()
-                    .hover(move |style| style.bg(hover_bg))
-                    .active(|style| style.opacity(0.9))
+                    .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
+                    .active(move |style| style.bg(active_bg))
                     .when_some(self.on_click, |this, handler| {
                         this.on_click(move |event, window, app| handler(event, window, app))
                     })

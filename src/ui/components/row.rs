@@ -66,7 +66,7 @@ impl RenderOnce for Row {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(2.0))
+                            .gap(theme::space_half())
                             .min_w(px(0.0))
                             .child(
                                 div()

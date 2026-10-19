@@ -12,6 +12,10 @@ use crate::ui::theme::{self, Appearance, SurfaceTreatment, Theme};
 
 use super::Dashboard;
 
+/// The mini window preview shown beside each theme choice.
+const PREVIEW_WIDTH: f32 = 96.0;
+const PREVIEW_HEIGHT: f32 = 64.0;
+
 impl Dashboard {
     pub(super) fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = Theme::of(cx);
@@ -47,8 +51,8 @@ impl Dashboard {
         let backdrop_control = div()
             .flex()
             .items_center()
-            .gap(px(2.0))
-            .p(px(2.0))
+            .gap(theme::space_half())
+            .p(theme::space_half())
             .bg(t.surface_active)
             .border_1()
             .border_color(t.border)
@@ -179,8 +183,8 @@ impl Dashboard {
                 div()
                     .flex()
                     .flex_col()
-                    .w(px(96.0))
-                    .h(px(64.0))
+                    .w(px(PREVIEW_WIDTH))
+                    .h(px(PREVIEW_HEIGHT))
                     .rounded(theme::radius_md())
                     .overflow_hidden()
                     .border_2()
@@ -206,27 +210,27 @@ impl Dashboard {
                                     .flex()
                                     .flex_col()
                                     .flex_1()
-                                    .gap(px(4.0))
+                                    .gap(theme::space_1())
                                     .p(px(7.0))
                                     .child(
                                         div()
                                             .w_full()
                                             .h(px(7.0))
-                                            .rounded(px(2.0))
+                                            .rounded(theme::radius_xs())
                                             .bg(target.surface_hover),
                                     )
                                     .child(
                                         div()
                                             .w_full()
                                             .h(px(7.0))
-                                            .rounded(px(2.0))
+                                            .rounded(theme::radius_xs())
                                             .bg(target.surface_hover),
                                     )
                                     .child(
                                         div()
                                             .w(px(28.0))
                                             .h(px(7.0))
-                                            .rounded(px(2.0))
+                                            .rounded(theme::radius_xs())
                                             .bg(target.surface_hover),
                                     ),
                             ),

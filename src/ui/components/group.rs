@@ -3,7 +3,7 @@
 
 use gpui::base::StyledExt as _;
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, App, Div, IntoElement, SharedString, StyleRefinement, Window};
+use gpui::{div, AnyElement, App, Div, IntoElement, SharedString, StyleRefinement, Window};
 
 use crate::ui::theme::{self, Theme};
 
@@ -62,7 +62,7 @@ impl RenderOnce for SettingsGroup {
                     div()
                         .w_full()
                         .pl(theme::space_4())
-                        .child(div().h(px(1.0)).w_full().bg(t.border))
+                        .child(div().h(theme::hairline()).w_full().bg(t.border))
                         .into_any_element(),
                 );
             }
@@ -76,7 +76,7 @@ impl RenderOnce for SettingsGroup {
             .when_some(self.title, |this, title| {
                 this.child(
                     div()
-                        .px(px(2.0))
+                        .px(theme::space_half())
                         .text_size(theme::text_small())
                         .font_weight(theme::weight_medium())
                         .text_color(t.text_muted)

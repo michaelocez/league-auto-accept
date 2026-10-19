@@ -357,7 +357,8 @@ pub(crate) fn status_color(summary: &str, t: &Theme) -> Rgba {
         "Active" => t.success,
         "Connecting" => t.warning,
         "League offline" => t.danger,
-        _ => t.text_muted,
+        // An inactive or unknown state gets the faintest dot: "Disabled" must not read as a status.
+        _ => t.text_faint,
     }
 }
 

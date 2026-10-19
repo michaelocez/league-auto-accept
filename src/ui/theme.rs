@@ -1,4 +1,4 @@
-//! Visual language: one token system for colour, spacing, radii and typography.
+//! Visual language: one token system for colour, spacing, radii, typography, sizes and motion.
 //!
 //! The palette is defined twice — a resolved **dark** set and a designed **light** set (light is
 //! authored, never an inversion of dark). The active set is selected by the [`Appearance`] global,
@@ -9,7 +9,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use gpui::{px, App, FontWeight, Global, Pixels, Rgba, WindowBackgroundAppearance};
+use gpui::{px, App, FontWeight, Global, Pixels, Rgba, SpringConfig, WindowBackgroundAppearance};
 
 use crate::config::settings::{BackdropMode, ThemeMode};
 
@@ -128,6 +128,8 @@ pub struct Theme {
     pub accent: Rgba,
     /// Accent under the pointer.
     pub accent_hover: Rgba,
+    /// Accent while pressed: one step past hover, so a click reads as a press rather than a flicker.
+    pub accent_active: Rgba,
     /// Foreground used on top of the accent.
     pub accent_fg: Rgba,
     /// Success state.
@@ -168,6 +170,7 @@ impl Theme {
             // Neutral, near-white accent: a monochrome action colour rather than a brand hue.
             accent: rgb(0xfafafa),
             accent_hover: rgb(0xffffff),
+            accent_active: rgb(0xe4e4e7),
             accent_fg: rgb(0x131315),
             success: rgb(0x5ec98f),
             warning: rgb(0xd8b15f),
@@ -192,6 +195,7 @@ impl Theme {
             // Neutral, near-black accent in light mode.
             accent: rgb(0x1c1c1f),
             accent_hover: rgb(0x000000),
+            accent_active: rgb(0x33333a),
             accent_fg: rgb(0xffffff),
             success: rgb(0x2f9e63),
             warning: rgb(0xa8761f),
@@ -418,6 +422,9 @@ pub fn text_small() -> Pixels {
 pub fn text_caption() -> Pixels {
     px(12.0)
 }
+pub fn text_micro() -> Pixels {
+    px(11.0)
+}
 
 pub fn weight_regular() -> FontWeight {
     FontWeight::NORMAL
@@ -427,4 +434,67 @@ pub fn weight_medium() -> FontWeight {
 }
 pub fn weight_semibold() -> FontWeight {
     FontWeight::SEMIBOLD
+}
+
+// --- Fixed sizes ------------------------------------------------------------------------------
+//
+// Dimensions the chrome repeats: a hairline, the standard marks and dots, and the shell's own
+// measurements. Anything that only one element needs stays a constant beside that element.
+
+/// A single-pixel hairline: separators and borders, below the 4px spacing grid.
+pub fn hairline() -> Pixels {
+    px(1.0)
+}
+
+/// A status or activity dot.
+pub fn size_dot() -> Pixels {
+    px(8.0)
+}
+
+/// A navigation glyph's box, so labels align regardless of the glyph's own width.
+pub fn size_icon() -> Pixels {
+    px(16.0)
+}
+
+/// The application mark drawn in the title bar.
+pub fn size_mark() -> Pixels {
+    px(18.0)
+}
+
+/// The title bar's height, and the height of the window controls inside it.
+pub fn size_title_bar() -> Pixels {
+    px(44.0)
+}
+
+/// One window control button's width.
+pub fn size_control() -> Pixels {
+    px(46.0)
+}
+
+/// The navigation rail's width.
+pub fn size_sidebar() -> Pixels {
+    px(190.0)
+}
+
+/// The widest a text field's column grows, so text stays readable instead of stretching.
+pub fn size_field_max() -> Pixels {
+    px(440.0)
+}
+
+/// An extra-small radius for miniature surfaces (the theme previews).
+pub fn radius_xs() -> Pixels {
+    px(2.0)
+}
+
+/// The tightest step: insets and gaps that need to be smaller than the 4px grid.
+pub fn space_half() -> Pixels {
+    px(2.0)
+}
+
+// --- Motion -----------------------------------------------------------------------------------
+
+/// The spring used wherever a state change should read as motion rather than an instant flip:
+/// quick and near-critically damped, so there is no visible overshoot.
+pub fn spring_snappy() -> SpringConfig {
+    SpringConfig::new(180.0, 26.0, 1.0)
 }
