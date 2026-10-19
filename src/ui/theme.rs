@@ -1,4 +1,4 @@
-//! Visual language: one token system for colour, spacing, radii and typography.
+//! Visual language: one token system for colour, spacing, radii, typography, sizes and motion.
 //!
 //! The palette is defined twice — a resolved **dark** set and a designed **light** set (light is
 //! authored, never an inversion of dark). The active set is selected by the [`Appearance`] global,
@@ -9,7 +9,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use gpui::{px, App, FontWeight, Global, Pixels, Rgba, WindowBackgroundAppearance};
+use gpui::{px, App, FontWeight, Global, Pixels, Rgba, SpringConfig, WindowBackgroundAppearance};
 
 use crate::config::settings::{BackdropMode, ThemeMode};
 
@@ -24,11 +24,6 @@ pub enum Appearance {
 impl Global for Appearance {}
 
 impl Appearance {
-    /// Resolves this appearance to its opaque token set.
-    pub fn theme(self) -> Theme {
-        self.theme_with(SurfaceTreatment::Opaque)
-    }
-
     /// Resolves this appearance + surface treatment to a concrete token set.
     pub fn theme_with(self, treatment: SurfaceTreatment) -> Theme {
         match (self, treatment) {
@@ -100,8 +95,6 @@ impl From<SurfaceTreatment> for BackdropMode {
 /// The fully resolved colour tokens for one appearance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
-    /// The window/page background behind everything.
-    pub window_bg: Rgba,
     /// The navigation sidebar surface (slightly offset from the page background).
     pub sidebar_bg: Rgba,
     /// The main content background.
@@ -128,6 +121,8 @@ pub struct Theme {
     pub accent: Rgba,
     /// Accent under the pointer.
     pub accent_hover: Rgba,
+    /// Accent while pressed: one step past hover, so a click reads as a press rather than a flicker.
+    pub accent_active: Rgba,
     /// Foreground used on top of the accent.
     pub accent_fg: Rgba,
     /// Success state.
@@ -151,24 +146,24 @@ impl Theme {
 
     pub const fn dark() -> Self {
         Self {
-            // Chrome (title bar + sidebar) sits on the window ground; the content pane is a hair
-            // lighter. The two are separated by a hairline, not by a heavy filled slab.
-            window_bg: rgb(0x0e0e10),
-            sidebar_bg: rgb(0x0e0e10),
-            bg: rgb(0x131315),
-            bg_elevated: rgb(0x1a1a1d),
-            surface: rgb(0x17171a),
-            surface_hover: rgb(0x1f1f23),
-            surface_active: rgb(0x2a2a30),
-            border: rgb(0x26262b),
-            border_strong: rgb(0x3a3a42),
+            // The rail is the deepest surface; the page beside it is a hair lighter and the cards
+            // step up again, so the layered fills — not a hairline — are what separate them.
+            sidebar_bg: rgb(0x0a0a0d),
+            bg: rgb(0x101014),
+            bg_elevated: rgb(0x17171c),
+            surface: rgb(0x141419),
+            surface_hover: rgb(0x1c1c22),
+            surface_active: rgb(0x26262e),
+            border: rgb(0x1f1f26),
+            border_strong: rgb(0x33333d),
             text: rgb(0xf5f5f7),
-            text_muted: rgb(0xa2a2ab),
-            text_faint: rgb(0x71717a),
+            text_muted: rgb(0xa6a6b0),
+            text_faint: rgb(0x74747f),
             // Neutral, near-white accent: a monochrome action colour rather than a brand hue.
             accent: rgb(0xfafafa),
             accent_hover: rgb(0xffffff),
-            accent_fg: rgb(0x131315),
+            accent_active: rgb(0xe4e4e7),
+            accent_fg: rgb(0x101014),
             success: rgb(0x5ec98f),
             warning: rgb(0xd8b15f),
             danger: rgb(0xe08383),
@@ -177,21 +172,21 @@ impl Theme {
 
     pub const fn light() -> Self {
         Self {
-            window_bg: rgb(0xededf0),
-            sidebar_bg: rgb(0xededf0),
-            bg: rgb(0xf7f7f8),
+            sidebar_bg: rgb(0xe9e9ee),
+            bg: rgb(0xf5f5f7),
             bg_elevated: rgb(0xffffff),
             surface: rgb(0xffffff),
-            surface_hover: rgb(0xf0f0f2),
-            surface_active: rgb(0xe6e6ea),
-            border: rgb(0xe4e4e8),
-            border_strong: rgb(0xcfcfd6),
-            text: rgb(0x1c1c1f),
-            text_muted: rgb(0x5f5f68),
-            text_faint: rgb(0x8e8e98),
+            surface_hover: rgb(0xececef),
+            surface_active: rgb(0xe2e2e7),
+            border: rgb(0xdedee4),
+            border_strong: rgb(0xc6c6ce),
+            text: rgb(0x1a1a1e),
+            text_muted: rgb(0x5b5b66),
+            text_faint: rgb(0x8a8a95),
             // Neutral, near-black accent in light mode.
-            accent: rgb(0x1c1c1f),
+            accent: rgb(0x1a1a1e),
             accent_hover: rgb(0x000000),
+            accent_active: rgb(0x33333a),
             accent_fg: rgb(0xffffff),
             success: rgb(0x2f9e63),
             warning: rgb(0xa8761f),
@@ -203,18 +198,19 @@ impl Theme {
     /// opaque so text stays legible while the wallpaper still reads through.
     pub const fn dark_mica() -> Self {
         Self {
-            window_bg: rgb_a(0x0e0e10, 0.0),
-            sidebar_bg: rgb_a(0x0e0e10, 0.20),
-            bg: rgb_a(0x131315, 0.24),
-            bg_elevated: rgb_a(0x1a1a1d, 0.52),
-            surface: rgb_a(0x17171a, 0.48),
-            surface_hover: rgb_a(0x1f1f23, 0.62),
-            surface_active: rgb_a(0x2a2a30, 0.72),
+            // The rail and the page carry the same tint, so the window reads as one glass sheet and
+            // only the base colour separates them — the rail is defined by its items, not by a band.
+            sidebar_bg: rgb_a(0x0a0a0d, 0.16),
+            bg: rgb_a(0x101014, 0.16),
+            bg_elevated: rgb_a(0x17171c, 0.24),
+            surface: rgb_a(0x141419, 0.22),
+            surface_hover: rgb_a(0x1c1c22, 0.32),
+            surface_active: rgb_a(0x26262e, 0.44),
             border: rgb_a(0xffffff, 0.10),
             border_strong: rgb_a(0xffffff, 0.18),
             // Lighter secondary text so it stays legible over a translucent (not pure-black) ground.
-            text_muted: rgb(0xb6b6bf),
-            text_faint: rgb(0x8c8c95),
+            text_muted: rgb(0xb9b9c2),
+            text_faint: rgb(0x8f8f99),
             ..Self::dark()
         }
     }
@@ -222,13 +218,12 @@ impl Theme {
     /// Light Mica: over a light backdrop, grouped surfaces stay near-opaque to keep text contrast.
     pub const fn light_mica() -> Self {
         Self {
-            window_bg: rgb_a(0xededf0, 0.0),
-            sidebar_bg: rgb_a(0xededf0, 0.62),
-            bg: rgb_a(0xf7f7f8, 0.64),
-            bg_elevated: rgb_a(0xffffff, 0.82),
-            surface: rgb_a(0xffffff, 0.82),
-            surface_hover: rgb_a(0xf0f0f2, 0.88),
-            surface_active: rgb_a(0xe6e6ea, 0.92),
+            sidebar_bg: rgb_a(0xe9e9ee, 0.40),
+            bg: rgb_a(0xf5f5f7, 0.40),
+            bg_elevated: rgb_a(0xffffff, 0.52),
+            surface: rgb_a(0xffffff, 0.50),
+            surface_hover: rgb_a(0xececef, 0.62),
+            surface_active: rgb_a(0xe2e2e7, 0.72),
             border: rgb_a(0x000000, 0.10),
             border_strong: rgb_a(0x000000, 0.18),
             // Darker secondary text so it stays legible over a mid-grey translucent ground.
@@ -243,15 +238,14 @@ impl Theme {
     /// further to let the blurred backdrop read while keeping text contrast.
     pub const fn dark_acrylic() -> Self {
         Self {
-            window_bg: rgb_a(0x0e0e10, 0.0),
-            // A more translucent nav rail, but the content ground stays dark so the window reads
-            // dark even over a bright wallpaper.
-            sidebar_bg: rgb_a(0x0e0e10, 0.30),
-            bg: rgb_a(0x131315, 0.42),
-            bg_elevated: rgb_a(0x1a1a1d, 0.30),
-            surface: rgb_a(0x17171a, 0.28),
-            surface_hover: rgb_a(0x1f1f23, 0.42),
-            surface_active: rgb_a(0x2a2a30, 0.55),
+            // Acrylic blurs what is behind the window, so the tint can sit far back: the rail and
+            // page keep the same light tint and the cards carry just enough to hold text.
+            sidebar_bg: rgb_a(0x0a0a0d, 0.14),
+            bg: rgb_a(0x101014, 0.14),
+            bg_elevated: rgb_a(0x17171c, 0.22),
+            surface: rgb_a(0x141419, 0.20),
+            surface_hover: rgb_a(0x1c1c22, 0.30),
+            surface_active: rgb_a(0x26262e, 0.42),
             border: rgb_a(0xffffff, 0.14),
             border_strong: rgb_a(0xffffff, 0.22),
             text_muted: rgb(0xb6b6bf),
@@ -263,13 +257,12 @@ impl Theme {
     /// Light Acrylic: a translucent nav rail and ground, with cards lifted so text keeps contrast.
     pub const fn light_acrylic() -> Self {
         Self {
-            window_bg: rgb_a(0xededf0, 0.0),
-            sidebar_bg: rgb_a(0xededf0, 0.24),
-            bg: rgb_a(0xf7f7f8, 0.42),
-            bg_elevated: rgb_a(0xffffff, 0.66),
-            surface: rgb_a(0xffffff, 0.64),
-            surface_hover: rgb_a(0xf0f0f2, 0.74),
-            surface_active: rgb_a(0xe6e6ea, 0.82),
+            sidebar_bg: rgb_a(0xe9e9ee, 0.18),
+            bg: rgb_a(0xf5f5f7, 0.18),
+            bg_elevated: rgb_a(0xffffff, 0.38),
+            surface: rgb_a(0xffffff, 0.36),
+            surface_hover: rgb_a(0xececef, 0.48),
+            surface_active: rgb_a(0xe2e2e7, 0.60),
             border: rgb_a(0x000000, 0.14),
             border_strong: rgb_a(0x000000, 0.24),
             text: rgb(0x121215),
@@ -392,13 +385,13 @@ pub fn space_8() -> Pixels {
 // --- Corner radii ----------------------------------------------------------------------------
 
 pub fn radius_sm() -> Pixels {
-    px(6.0)
-}
-pub fn radius_md() -> Pixels {
     px(8.0)
 }
+pub fn radius_md() -> Pixels {
+    px(10.0)
+}
 pub fn radius_lg() -> Pixels {
-    px(12.0)
+    px(16.0)
 }
 
 // --- Type scale ------------------------------------------------------------------------------
@@ -418,6 +411,9 @@ pub fn text_small() -> Pixels {
 pub fn text_caption() -> Pixels {
     px(12.0)
 }
+pub fn text_micro() -> Pixels {
+    px(11.0)
+}
 
 pub fn weight_regular() -> FontWeight {
     FontWeight::NORMAL
@@ -427,4 +423,78 @@ pub fn weight_medium() -> FontWeight {
 }
 pub fn weight_semibold() -> FontWeight {
     FontWeight::SEMIBOLD
+}
+
+// --- Fixed sizes ------------------------------------------------------------------------------
+//
+// Dimensions the chrome repeats: a hairline, the standard marks and dots, and the shell's own
+// measurements. Anything that only one element needs stays a constant beside that element.
+
+/// A single-pixel hairline: separators and borders, below the 4px spacing grid.
+pub fn hairline() -> Pixels {
+    px(1.0)
+}
+
+/// A status or activity dot.
+pub fn size_dot() -> Pixels {
+    px(8.0)
+}
+
+/// A navigation glyph's box, so labels align regardless of the glyph's own width.
+pub fn size_icon() -> Pixels {
+    px(16.0)
+}
+
+/// The application mark drawn in the title bar.
+pub fn size_mark() -> Pixels {
+    px(18.0)
+}
+
+/// The title bar's height, and the height of the window controls inside it.
+pub fn size_title_bar() -> Pixels {
+    px(44.0)
+}
+
+/// One window control button's width.
+pub fn size_control() -> Pixels {
+    px(46.0)
+}
+
+/// The navigation rail's width.
+pub fn size_sidebar() -> Pixels {
+    px(190.0)
+}
+
+/// The widest a text field's column grows, so text stays readable instead of stretching.
+pub fn size_field_max() -> Pixels {
+    px(440.0)
+}
+
+/// An extra-small radius for miniature surfaces (the theme previews).
+pub fn radius_xs() -> Pixels {
+    px(2.0)
+}
+
+/// The tightest step: insets and gaps that need to be smaller than the 4px grid.
+pub fn space_half() -> Pixels {
+    px(2.0)
+}
+
+// --- Motion -----------------------------------------------------------------------------------
+
+/// The spring used wherever a state change should read as motion rather than an instant flip:
+/// quick and near-critically damped, so there is no visible overshoot.
+pub fn spring_snappy() -> SpringConfig {
+    SpringConfig::new(180.0, 26.0, 1.0)
+}
+
+/// Hover alpha for a control whose fill is animated (the toggle's spring), where a flat hover fill
+/// would fight the animation. Controls with flat fills use the state fills instead.
+pub fn hover_alpha() -> f32 {
+    0.92
+}
+
+/// Press alpha, for the same animated-fill controls.
+pub fn press_alpha() -> f32 {
+    0.85
 }

@@ -65,7 +65,7 @@ pub(crate) fn app_mark(t: &Theme) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .size(px(18.0))
+        .size(theme::size_mark())
         .flex_shrink_0()
         .rounded_full()
         .bg(t.surface_active)
@@ -73,43 +73,70 @@ pub(crate) fn app_mark(t: &Theme) -> impl IntoElement {
         .border_color(t.border_strong)
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(theme::text_micro())
                 .font_weight(FontWeight::BOLD)
                 .text_color(t.text)
                 .child("\u{2713}"), // ✓
         )
 }
 
-impl RenderOnce for TitleBar {
+/// The rail's top strip: the app mark and name. It sits on the navigation rail rather than in a
+/// band across the window, so the rail runs the full height of the app and the title area above the
+/// content stays part of the page. Draggable, like the rest of the title area.
+#[derive(IntoElement)]
+pub struct SidebarHeader {}
+
+impl SidebarHeader {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Default for SidebarHeader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RenderOnce for SidebarHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = Theme::of(cx);
         div()
             .flex()
             .items_center()
-            .h(px(44.0))
+            .gap(theme::space_2())
+            .h(theme::size_title_bar())
             .w_full()
             .flex_shrink_0()
-            .bg(t.sidebar_bg)
-            .border_b_1()
-            .border_color(t.border)
+            .px(theme::space_3())
+            .window_control_area(WindowControlArea::Drag)
+            .child(app_mark(&t))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(theme::space_2())
+                    .text_size(theme::text_small())
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(t.text)
+                    .child("League Auto Accept"),
+            )
+    }
+}
+
+impl RenderOnce for TitleBar {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        // The leading strip lives on the rail (`SidebarHeader`); what is left here is the draggable
+        // remainder of the title area and the window buttons, drawn straight onto the page.
+        div()
+            .flex()
+            .items_center()
+            .h(theme::size_title_bar())
+            .w_full()
+            .flex_shrink_0()
+            .child(
+                div()
                     .flex_1()
                     .h_full()
                     .min_w(px(0.0))
-                    .px(theme::space_3())
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(app_mark(&t))
-                    .child(
-                        div()
-                            .text_size(theme::text_small())
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(t.text)
-                            .child("League Auto Accept"),
-                    ),
+                    .window_control_area(WindowControlArea::Drag),
             )
             .child(WindowControls::new())
     }
@@ -143,10 +170,10 @@ fn control_button(
         .flex()
         .items_center()
         .justify_center()
-        .w(px(46.0))
-        .h(px(44.0))
+        .w(theme::size_control())
+        .h(theme::size_title_bar())
         .cursor_pointer()
-        .text_size(px(11.0))
+        .text_size(theme::text_micro())
         .text_color(fg)
         .window_control_area(area)
         .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
@@ -244,9 +271,9 @@ fn nav_item(screen: Screen, active: bool, t: &Theme, on_nav: NavHandler) -> impl
         .on_click(move |event, window, app| on_nav(screen, event, window, app))
         .child(
             div()
-                .w(px(16.0))
+                .w(theme::size_icon())
                 .text_center()
-                .text_size(px(13.0))
+                .text_size(theme::text_small())
                 .child(screen.glyph()),
         )
         .child(div().text_size(theme::text_body()).child(screen.label()))
@@ -264,17 +291,16 @@ impl RenderOnce for Sidebar {
         div()
             .flex()
             .flex_col()
-            .w(px(190.0))
+            .w(theme::size_sidebar())
             .h_full()
             .flex_shrink_0()
             .bg(t.sidebar_bg)
-            .border_r_1()
-            .border_color(t.border)
+            .child(SidebarHeader::new())
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
+                    .gap(theme::space_half())
                     .flex_1()
                     .min_h(px(0.0))
                     .p(theme::space_3())
@@ -292,7 +318,12 @@ impl RenderOnce for Sidebar {
                             .flex()
                             .items_center()
                             .gap(theme::space_2())
-                            .child(div().size(px(8.0)).rounded_full().bg(self.status_color))
+                            .child(
+                                div()
+                                    .size(theme::size_dot())
+                                    .rounded_full()
+                                    .bg(self.status_color),
+                            )
                             .child(
                                 div()
                                     .text_size(theme::text_small())

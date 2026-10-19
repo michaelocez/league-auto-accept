@@ -19,6 +19,9 @@ use crate::ui::dashboard::{status_color, Dashboard};
 use crate::ui::shell::app_mark;
 use crate::ui::theme::{self, Theme};
 
+/// The close button's hit target.
+const CLOSE_SIZE: f32 = 24.0;
+
 pub struct TrayPopup {
     dashboard: Entity<Dashboard>,
     tx: Sender<AppEvent>,
@@ -95,8 +98,6 @@ impl Render for TrayPopup {
                     .justify_between()
                     .px(theme::space_4())
                     .py(theme::space_3())
-                    .border_b_1()
-                    .border_color(t.border)
                     .child(
                         div()
                             .flex()
@@ -116,10 +117,10 @@ impl Render for TrayPopup {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .size(px(24.0))
+                            .size(px(CLOSE_SIZE))
                             .rounded(theme::radius_sm())
                             .cursor_pointer()
-                            .text_size(px(12.0))
+                            .text_size(theme::text_caption())
                             .text_color(t.text_muted)
                             .hover(|style| style.bg(t.surface_hover).text_color(t.text))
                             .on_click(|_event: &ClickEvent, window, _app| {
@@ -140,7 +141,7 @@ impl Render for TrayPopup {
                             .flex()
                             .items_center()
                             .gap(theme::space_2())
-                            .child(div().size(px(8.0)).rounded_full().bg(status))
+                            .child(div().size(theme::size_dot()).rounded_full().bg(status))
                             .child(
                                 div()
                                     .text_size(theme::text_heading())
@@ -202,8 +203,6 @@ impl Render for TrayPopup {
                     .gap(theme::space_2())
                     .px(theme::space_4())
                     .py(theme::space_3())
-                    .border_t_1()
-                    .border_color(t.border)
                     .child(
                         Button::new("popup-open", "Open")
                             .variant(ButtonVariant::Secondary)

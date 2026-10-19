@@ -66,11 +66,12 @@ impl RenderOnce for Row {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(2.0))
+                            .gap(theme::space_half())
                             .min_w(px(0.0))
                             .child(
                                 div()
                                     .text_size(theme::text_body())
+                                    .font_weight(theme::weight_semibold())
                                     .text_color(t.text)
                                     .child(self.label),
                             )

@@ -51,7 +51,7 @@ impl Dashboard {
                     .flex()
                     .flex_col()
                     .gap(theme::space_2())
-                    .max_w(px(440.0))
+                    .max_w(theme::size_field_max())
                     .child(Self::input_frame(&self.webhook, cx))
                     .child(
                         div()
@@ -189,6 +189,7 @@ impl Dashboard {
             .child(
                 div()
                     .px(theme::space_4())
+                    .pt(theme::space_4())
                     .pb(theme::space_3())
                     .text_size(theme::text_caption())
                     .text_color(t.text_muted)
@@ -243,7 +244,7 @@ impl Dashboard {
         Row::new(label)
             .child(
                 div()
-                    .max_w(px(440.0))
+                    .max_w(theme::size_field_max())
                     .child(Self::input_frame(template, cx)),
             )
             .when_some(error, |this, message| {

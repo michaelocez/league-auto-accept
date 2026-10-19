@@ -26,9 +26,10 @@ pub enum ThemeMode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackdropMode {
-    #[default]
     Opaque,
     Mica,
+    /// The default: a translucent window over the desktop.
+    #[default]
     Acrylic,
 }
 
@@ -91,7 +92,10 @@ impl Default for AppSettings {
             },
             minimize_to_tray: true,
             theme_mode: ThemeMode::Dark,
-            window_backdrop: BackdropMode::Opaque,
+            // Acrylic by default: it blurs what is behind the window, which is the see-through glass
+            // the design aims at. Mica (subtler, wallpaper-sampled) and Opaque stay available, and an
+            // existing install keeps whatever it has already saved.
+            window_backdrop: BackdropMode::Acrylic,
         }
     }
 }
@@ -464,8 +468,9 @@ mod tests {
             &json!({ "themeMode": "blue", "windowBackdrop": 7 }),
             &fallback,
         );
-        assert_eq!(invalid.theme_mode, ThemeMode::Dark);
-        assert_eq!(invalid.window_backdrop, BackdropMode::Opaque);
+        // An unreadable value takes the fallback, whatever the fallback happens to be.
+        assert_eq!(invalid.theme_mode, fallback.theme_mode);
+        assert_eq!(invalid.window_backdrop, fallback.window_backdrop);
     }
 
     #[test]

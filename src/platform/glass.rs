@@ -10,11 +10,19 @@
 //!
 //! The probe is best-effort: on Windows 10 or pre-22621 builds the attribute fails and the window
 //! falls back to opaque, rather than being left transparent and unreadable.
+//!
+//! The material itself has a light and a dark variant, and Windows picks it from the *system* app
+//! mode rather than from this app's theme, so the app also sets `DWMWA_USE_IMMERSIVE_DARK_MODE`.
+//! Without it a dark theme over a light material composites to roughly `#d1d1d1`, where the
+//! near-white text lands near 1.4:1 — which is exactly what a Light-mode Windows would show on a
+//! fresh install.
 
 use std::ffi::c_void;
 
 use gpui::{Window, WindowBackgroundAppearance};
-use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE};
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+};
 
 use crate::platform::window::raw_hwnd;
 use crate::ui::theme::{Appearance, SurfaceTreatment};
@@ -33,6 +41,10 @@ pub fn apply(window: &Window, appearance: Appearance, treatment: SurfaceTreatmen
         window.set_background_appearance(WindowBackgroundAppearance::Opaque);
         return false;
     };
+
+    // Keep the DWM material on the same side as the theme the app is drawing, whatever the system
+    // app mode happens to be.
+    set_dark_mode(hwnd, appearance == Appearance::Dark);
 
     if treatment == SurfaceTreatment::Opaque {
         window.set_background_appearance(WindowBackgroundAppearance::Opaque);
@@ -76,4 +88,18 @@ unsafe fn set_backdrop_type(hwnd: windows_sys::Win32::Foundation::HWND, backdrop
         &backdrop as *const i32 as *const c_void,
         std::mem::size_of::<i32>() as u32,
     )
+}
+
+/// Selects DWM's light or dark material. Best effort: the attribute is unsupported before Windows 10
+/// 1809 and the call simply fails there, which is why the result is ignored.
+fn set_dark_mode(hwnd: windows_sys::Win32::Foundation::HWND, dark: bool) {
+    let value = i32::from(dark);
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            &value as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
 }

@@ -2,7 +2,7 @@
 
 use gpui::base::StyledExt as _;
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, App, Div, IntoElement, StyleRefinement, Window};
+use gpui::{div, AnyElement, App, Div, IntoElement, StyleRefinement, Window};
 
 use crate::ui::theme::{self, Theme};
 
@@ -16,7 +16,8 @@ pub enum Elevation {
     Raised,
 }
 
-/// A rounded, hairline-bordered container with a token-driven background.
+/// A rounded container with a token-driven background, separated from the page by its fill rather
+/// than by a border.
 #[derive(IntoElement)]
 pub struct Surface {
     base: Div,
@@ -78,10 +79,8 @@ impl RenderOnce for Surface {
             .flex()
             .flex_col()
             .bg(background)
-            .border_1()
-            .border_color(t.border)
             .rounded(theme::radius_lg())
-            .when(self.padded, |this| this.p_4())
+            .when(self.padded, |this| this.p(theme::space_4()))
             .children(self.children)
             .refine_style(&self.style)
     }
@@ -100,6 +99,6 @@ impl Divider {
 impl RenderOnce for Divider {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = Theme::of(cx);
-        div().w_full().h(px(1.0)).bg(t.border)
+        div().w_full().h(theme::hairline()).bg(t.border)
     }
 }

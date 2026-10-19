@@ -7,7 +7,10 @@ use crate::app::state::ActivityKind;
 use crate::ui::components::{Divider, Elevation, Surface, Toggle};
 use crate::ui::theme::{self, Theme};
 
-use super::Dashboard;
+use super::{status_color, Dashboard};
+
+/// Width of the activity timeline's vertical rail.
+const RAIL_WIDTH: f32 = 10.0;
 
 impl Dashboard {
     pub(super) fn render_dashboard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -16,12 +19,9 @@ impl Dashboard {
         let ready_message = self.state.ready_check_message.clone();
         let summary = self.state.summary();
 
-        let state_color = match summary {
-            "Active" => t.success,
-            "Connecting" => t.warning,
-            "League offline" => t.danger,
-            _ => t.text_faint,
-        };
+        // One mapping for every status dot in the app, so the hero and the sidebar/tray dot can
+        // never disagree about what a state looks like.
+        let state_color = status_color(summary, &t);
         let hero_detail = if auto_accept {
             ready_message
         } else {
@@ -44,7 +44,7 @@ impl Dashboard {
                                 .flex()
                                 .items_center()
                                 .gap(theme::space_3())
-                                .child(div().size(px(9.0)).rounded_full().bg(state_color))
+                                .child(div().size(theme::size_dot()).rounded_full().bg(state_color))
                                 .child(
                                     div()
                                         .text_size(theme::text_title())
@@ -113,22 +113,22 @@ impl Dashboard {
                 div()
                     .flex()
                     .gap(theme::space_3())
-                    .min_h(px(32.0))
+                    .min_h(theme::space_8())
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .items_center()
-                            .w(px(10.0))
+                            .w(px(RAIL_WIDTH))
                             .flex_shrink_0()
-                            .child(div().w(px(1.0)).h(px(8.0)).bg(top))
+                            .child(div().w(theme::hairline()).h(theme::size_dot()).bg(top))
                             .child(
                                 div()
-                                    .size(px(8.0))
+                                    .size(theme::size_dot())
                                     .rounded_full()
                                     .bg(activity_color(item.kind, t)),
                             )
-                            .child(div().w(px(1.0)).flex_1().bg(bottom)),
+                            .child(div().w(theme::hairline()).flex_1().bg(bottom)),
                     )
                     .child(
                         div()

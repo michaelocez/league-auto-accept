@@ -55,7 +55,7 @@ is rotated to `settings-error.log.1`, and the new one starts empty).
   up to 5 are ever mentioned). A fresh install has only **ready check accepted** switched on, so
   match-found and game-started notifications stay silent until you enable their switches.
 - **Appearance**: on the Settings page choose **Dark** or **Light**, and a window backdrop —
-  **Opaque** (default), **Mica**, or **Acrylic**. Your choices are saved and restored on next
+  **Opaque**, **Mica**, or **Acrylic** (default). Your choices are saved and restored on next
   launch.
 
 ## Configuration
@@ -143,6 +143,11 @@ GPUI views
 The UI observes application state and emits intents; it never owns LCU credentials or performs
 networking. The League backend runs on a background thread and communicates with the UI over a
 channel, so the client being closed or restarted never blocks or crashes the app.
+
+The window layer is `gpui-kit` 0.7 (`gpui = { package = "gpui-kit", … }` in `Cargo.toml`), a
+repackaged snapshot of GPUI rather than Zed's own crates.io crate; it is aliased to `gpui` so the
+imports read normally. The pin is deliberate — GPUI is pre-1.0, so it moves only as its own change,
+with the full validation suite and a Windows build behind it.
 
 ## Security model
 

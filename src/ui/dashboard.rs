@@ -357,7 +357,8 @@ pub(crate) fn status_color(summary: &str, t: &Theme) -> Rgba {
         "Active" => t.success,
         "Connecting" => t.warning,
         "League offline" => t.danger,
-        _ => t.text_muted,
+        // An inactive or unknown state gets the faintest dot: "Disabled" must not read as a status.
+        _ => t.text_faint,
     }
 }
 
@@ -429,7 +430,6 @@ impl Render for Dashboard {
             .size_full()
             .bg(t.bg)
             .text_color(t.text)
-            .child(title_bar)
             .child(
                 div().flex().flex_1().min_h(px(0.0)).child(sidebar).child(
                     div()
@@ -437,6 +437,7 @@ impl Render for Dashboard {
                         .flex_col()
                         .flex_1()
                         .min_w(px(0.0))
+                        .child(title_bar)
                         .child(header)
                         .child(
                             div()
