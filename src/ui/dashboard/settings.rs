@@ -151,7 +151,9 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let current = Theme::of(cx);
-        let target = value.theme();
+        // The preview follows the backdrop the user is on, so switching Opaque → Mica → Acrylic shows
+        // the translucency in the swatches themselves, not only in the window behind them.
+        let target = value.theme_with(theme::current_treatment());
         let label = match value {
             Appearance::Dark => "Dark",
             Appearance::Light => "Light",
@@ -159,7 +161,8 @@ impl Dashboard {
         let ring = if selected {
             current.accent
         } else {
-            current.border
+            // An unselected swatch still needs an edge in light mode, where `border` nearly vanishes.
+            current.border_strong
         };
 
         div()
@@ -182,55 +185,59 @@ impl Dashboard {
             .child(
                 div()
                     .flex()
-                    .flex_col()
                     .w(px(PREVIEW_WIDTH))
                     .h(px(PREVIEW_HEIGHT))
                     .rounded(theme::radius_md())
                     .overflow_hidden()
                     .border_2()
                     .border_color(ring)
-                    .bg(target.window_bg)
+                    .bg(target.bg)
+                    // The rail runs the full height, as it does in the window, and the content uses the
+                    // strongest surface tones available: in light mode the normal surface fills sit
+                    // within a few percent of the page, which turned the swatch into one white box.
                     .child(
                         div()
-                            .w_full()
-                            .h(px(10.0))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(theme::space_half())
+                            .w(px(20.0))
+                            .h_full()
                             .flex_shrink_0()
-                            .bg(target.sidebar_bg),
+                            .pt(px(6.0))
+                            .bg(target.surface_active)
+                            .child(div().size(px(4.0)).rounded_full().bg(target.text_faint))
+                            .child(div().size(px(4.0)).rounded_full().bg(target.border_strong))
+                            .child(div().size(px(4.0)).rounded_full().bg(target.border_strong)),
                     )
                     .child(
                         div()
                             .flex()
+                            .flex_col()
                             .flex_1()
-                            .min_h(px(0.0))
-                            .child(div().w(px(18.0)).h_full().bg(target.sidebar_bg))
+                            .min_w(px(0.0))
+                            .gap(theme::space_1())
+                            .p(px(7.0))
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_col()
-                                    .flex_1()
-                                    .gap(theme::space_1())
-                                    .p(px(7.0))
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .h(px(7.0))
-                                            .rounded(theme::radius_xs())
-                                            .bg(target.surface_hover),
-                                    )
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .h(px(7.0))
-                                            .rounded(theme::radius_xs())
-                                            .bg(target.surface_hover),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(28.0))
-                                            .h(px(7.0))
-                                            .rounded(theme::radius_xs())
-                                            .bg(target.surface_hover),
-                                    ),
+                                    .w_full()
+                                    .h(px(7.0))
+                                    .rounded(theme::radius_xs())
+                                    .bg(target.surface_active),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(7.0))
+                                    .rounded(theme::radius_xs())
+                                    .bg(target.border_strong),
+                            )
+                            .child(
+                                div()
+                                    .w(px(28.0))
+                                    .h(px(7.0))
+                                    .rounded(theme::radius_xs())
+                                    .bg(target.border_strong),
                             ),
                     ),
             )
