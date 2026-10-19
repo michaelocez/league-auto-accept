@@ -78,8 +78,6 @@ impl RenderOnce for Surface {
             .flex()
             .flex_col()
             .bg(background)
-            .border_1()
-            .border_color(t.border)
             .rounded(theme::radius_lg())
             .when(self.padded, |this| this.p(theme::space_4()))
             .children(self.children)

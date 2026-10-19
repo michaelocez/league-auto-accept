@@ -154,24 +154,25 @@ impl Theme {
     pub const fn dark() -> Self {
         Self {
             // Chrome (title bar + sidebar) sits on the window ground; the content pane is a hair
-            // lighter. The two are separated by a hairline, not by a heavy filled slab.
-            window_bg: rgb(0x0e0e10),
-            sidebar_bg: rgb(0x0e0e10),
-            bg: rgb(0x131315),
-            bg_elevated: rgb(0x1a1a1d),
-            surface: rgb(0x17171a),
-            surface_hover: rgb(0x1f1f23),
-            surface_active: rgb(0x2a2a30),
-            border: rgb(0x26262b),
-            border_strong: rgb(0x3a3a42),
+            // lighter. The layered fills — not a hairline — are what separate them, so the ground
+            // is deliberately deeper than the surfaces stacked above it.
+            window_bg: rgb(0x0a0a0d),
+            sidebar_bg: rgb(0x0a0a0d),
+            bg: rgb(0x101014),
+            bg_elevated: rgb(0x17171c),
+            surface: rgb(0x141419),
+            surface_hover: rgb(0x1c1c22),
+            surface_active: rgb(0x26262e),
+            border: rgb(0x1f1f26),
+            border_strong: rgb(0x33333d),
             text: rgb(0xf5f5f7),
-            text_muted: rgb(0xa2a2ab),
-            text_faint: rgb(0x71717a),
+            text_muted: rgb(0xa6a6b0),
+            text_faint: rgb(0x74747f),
             // Neutral, near-white accent: a monochrome action colour rather than a brand hue.
             accent: rgb(0xfafafa),
             accent_hover: rgb(0xffffff),
             accent_active: rgb(0xe4e4e7),
-            accent_fg: rgb(0x131315),
+            accent_fg: rgb(0x101014),
             success: rgb(0x5ec98f),
             warning: rgb(0xd8b15f),
             danger: rgb(0xe08383),
@@ -180,20 +181,20 @@ impl Theme {
 
     pub const fn light() -> Self {
         Self {
-            window_bg: rgb(0xededf0),
-            sidebar_bg: rgb(0xededf0),
-            bg: rgb(0xf7f7f8),
+            window_bg: rgb(0xe9e9ee),
+            sidebar_bg: rgb(0xe9e9ee),
+            bg: rgb(0xf5f5f7),
             bg_elevated: rgb(0xffffff),
             surface: rgb(0xffffff),
-            surface_hover: rgb(0xf0f0f2),
-            surface_active: rgb(0xe6e6ea),
-            border: rgb(0xe4e4e8),
-            border_strong: rgb(0xcfcfd6),
-            text: rgb(0x1c1c1f),
-            text_muted: rgb(0x5f5f68),
-            text_faint: rgb(0x8e8e98),
+            surface_hover: rgb(0xececef),
+            surface_active: rgb(0xe2e2e7),
+            border: rgb(0xdedee4),
+            border_strong: rgb(0xc6c6ce),
+            text: rgb(0x1a1a1e),
+            text_muted: rgb(0x5b5b66),
+            text_faint: rgb(0x8a8a95),
             // Neutral, near-black accent in light mode.
-            accent: rgb(0x1c1c1f),
+            accent: rgb(0x1a1a1e),
             accent_hover: rgb(0x000000),
             accent_active: rgb(0x33333a),
             accent_fg: rgb(0xffffff),
@@ -207,13 +208,13 @@ impl Theme {
     /// opaque so text stays legible while the wallpaper still reads through.
     pub const fn dark_mica() -> Self {
         Self {
-            window_bg: rgb_a(0x0e0e10, 0.0),
-            sidebar_bg: rgb_a(0x0e0e10, 0.20),
-            bg: rgb_a(0x131315, 0.24),
-            bg_elevated: rgb_a(0x1a1a1d, 0.52),
-            surface: rgb_a(0x17171a, 0.48),
-            surface_hover: rgb_a(0x1f1f23, 0.62),
-            surface_active: rgb_a(0x2a2a30, 0.72),
+            window_bg: rgb_a(0x0a0a0d, 0.0),
+            sidebar_bg: rgb_a(0x0a0a0d, 0.24),
+            bg: rgb_a(0x101014, 0.32),
+            bg_elevated: rgb_a(0x17171c, 0.60),
+            surface: rgb_a(0x141419, 0.56),
+            surface_hover: rgb_a(0x1c1c22, 0.68),
+            surface_active: rgb_a(0x26262e, 0.78),
             border: rgb_a(0xffffff, 0.10),
             border_strong: rgb_a(0xffffff, 0.18),
             // Lighter secondary text so it stays legible over a translucent (not pure-black) ground.
@@ -226,13 +227,13 @@ impl Theme {
     /// Light Mica: over a light backdrop, grouped surfaces stay near-opaque to keep text contrast.
     pub const fn light_mica() -> Self {
         Self {
-            window_bg: rgb_a(0xededf0, 0.0),
-            sidebar_bg: rgb_a(0xededf0, 0.62),
-            bg: rgb_a(0xf7f7f8, 0.64),
-            bg_elevated: rgb_a(0xffffff, 0.82),
-            surface: rgb_a(0xffffff, 0.82),
-            surface_hover: rgb_a(0xf0f0f2, 0.88),
-            surface_active: rgb_a(0xe6e6ea, 0.92),
+            window_bg: rgb_a(0xe9e9ee, 0.0),
+            sidebar_bg: rgb_a(0xe9e9ee, 0.64),
+            bg: rgb_a(0xf5f5f7, 0.66),
+            bg_elevated: rgb_a(0xffffff, 0.84),
+            surface: rgb_a(0xffffff, 0.84),
+            surface_hover: rgb_a(0xececef, 0.90),
+            surface_active: rgb_a(0xe2e2e7, 0.94),
             border: rgb_a(0x000000, 0.10),
             border_strong: rgb_a(0x000000, 0.18),
             // Darker secondary text so it stays legible over a mid-grey translucent ground.
@@ -247,15 +248,15 @@ impl Theme {
     /// further to let the blurred backdrop read while keeping text contrast.
     pub const fn dark_acrylic() -> Self {
         Self {
-            window_bg: rgb_a(0x0e0e10, 0.0),
+            window_bg: rgb_a(0x0a0a0d, 0.0),
             // A more translucent nav rail, but the content ground stays dark so the window reads
             // dark even over a bright wallpaper.
-            sidebar_bg: rgb_a(0x0e0e10, 0.30),
-            bg: rgb_a(0x131315, 0.42),
-            bg_elevated: rgb_a(0x1a1a1d, 0.30),
-            surface: rgb_a(0x17171a, 0.28),
-            surface_hover: rgb_a(0x1f1f23, 0.42),
-            surface_active: rgb_a(0x2a2a30, 0.55),
+            sidebar_bg: rgb_a(0x0a0a0d, 0.34),
+            bg: rgb_a(0x101014, 0.50),
+            bg_elevated: rgb_a(0x17171c, 0.40),
+            surface: rgb_a(0x141419, 0.38),
+            surface_hover: rgb_a(0x1c1c22, 0.52),
+            surface_active: rgb_a(0x26262e, 0.64),
             border: rgb_a(0xffffff, 0.14),
             border_strong: rgb_a(0xffffff, 0.22),
             text_muted: rgb(0xb6b6bf),
@@ -267,13 +268,13 @@ impl Theme {
     /// Light Acrylic: a translucent nav rail and ground, with cards lifted so text keeps contrast.
     pub const fn light_acrylic() -> Self {
         Self {
-            window_bg: rgb_a(0xededf0, 0.0),
-            sidebar_bg: rgb_a(0xededf0, 0.24),
-            bg: rgb_a(0xf7f7f8, 0.42),
-            bg_elevated: rgb_a(0xffffff, 0.66),
-            surface: rgb_a(0xffffff, 0.64),
-            surface_hover: rgb_a(0xf0f0f2, 0.74),
-            surface_active: rgb_a(0xe6e6ea, 0.82),
+            window_bg: rgb_a(0xe9e9ee, 0.0),
+            sidebar_bg: rgb_a(0xe9e9ee, 0.26),
+            bg: rgb_a(0xf5f5f7, 0.46),
+            bg_elevated: rgb_a(0xffffff, 0.70),
+            surface: rgb_a(0xffffff, 0.68),
+            surface_hover: rgb_a(0xececef, 0.78),
+            surface_active: rgb_a(0xe2e2e7, 0.86),
             border: rgb_a(0x000000, 0.14),
             border_strong: rgb_a(0x000000, 0.24),
             text: rgb(0x121215),
@@ -396,13 +397,13 @@ pub fn space_8() -> Pixels {
 // --- Corner radii ----------------------------------------------------------------------------
 
 pub fn radius_sm() -> Pixels {
-    px(6.0)
-}
-pub fn radius_md() -> Pixels {
     px(8.0)
 }
+pub fn radius_md() -> Pixels {
+    px(10.0)
+}
 pub fn radius_lg() -> Pixels {
-    px(12.0)
+    px(16.0)
 }
 
 // --- Type scale ------------------------------------------------------------------------------

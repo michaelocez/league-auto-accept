@@ -90,8 +90,6 @@ impl RenderOnce for TitleBar {
             .w_full()
             .flex_shrink_0()
             .bg(t.sidebar_bg)
-            .border_b_1()
-            .border_color(t.border)
             .child(
                 div()
                     .flex()
@@ -268,8 +266,6 @@ impl RenderOnce for Sidebar {
             .h_full()
             .flex_shrink_0()
             .bg(t.sidebar_bg)
-            .border_r_1()
-            .border_color(t.border)
             .child(
                 div()
                     .flex()

@@ -98,8 +98,6 @@ impl Render for TrayPopup {
                     .justify_between()
                     .px(theme::space_4())
                     .py(theme::space_3())
-                    .border_b_1()
-                    .border_color(t.border)
                     .child(
                         div()
                             .flex()
@@ -205,8 +203,6 @@ impl Render for TrayPopup {
                     .gap(theme::space_2())
                     .px(theme::space_4())
                     .py(theme::space_3())
-                    .border_t_1()
-                    .border_color(t.border)
                     .child(
                         Button::new("popup-open", "Open")
                             .variant(ButtonVariant::Secondary)

@@ -91,7 +91,9 @@ impl Default for AppSettings {
             },
             minimize_to_tray: true,
             theme_mode: ThemeMode::Dark,
-            window_backdrop: BackdropMode::Opaque,
+            // Mica by default: the window is meant to read as a translucent surface over the
+            // desktop. An existing install keeps whatever it has already saved.
+            window_backdrop: BackdropMode::Mica,
         }
     }
 }
@@ -464,8 +466,9 @@ mod tests {
             &json!({ "themeMode": "blue", "windowBackdrop": 7 }),
             &fallback,
         );
-        assert_eq!(invalid.theme_mode, ThemeMode::Dark);
-        assert_eq!(invalid.window_backdrop, BackdropMode::Opaque);
+        // An unreadable value takes the fallback, whatever the fallback happens to be.
+        assert_eq!(invalid.theme_mode, fallback.theme_mode);
+        assert_eq!(invalid.window_backdrop, fallback.window_backdrop);
     }
 
     #[test]

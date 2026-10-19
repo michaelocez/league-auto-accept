@@ -71,6 +71,7 @@ impl RenderOnce for Row {
                             .child(
                                 div()
                                     .text_size(theme::text_body())
+                                    .font_weight(theme::weight_semibold())
                                     .text_color(t.text)
                                     .child(self.label),
                             )

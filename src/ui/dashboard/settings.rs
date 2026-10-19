@@ -195,9 +195,7 @@ impl Dashboard {
                             .w_full()
                             .h(px(10.0))
                             .flex_shrink_0()
-                            .bg(target.sidebar_bg)
-                            .border_b_1()
-                            .border_color(target.border),
+                            .bg(target.sidebar_bg),
                     )
                     .child(
                         div()
