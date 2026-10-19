@@ -430,7 +430,6 @@ impl Render for Dashboard {
             .size_full()
             .bg(t.bg)
             .text_color(t.text)
-            .child(title_bar)
             .child(
                 div().flex().flex_1().min_h(px(0.0)).child(sidebar).child(
                     div()
@@ -438,6 +437,7 @@ impl Render for Dashboard {
                         .flex_col()
                         .flex_1()
                         .min_w(px(0.0))
+                        .child(title_bar)
                         .child(header)
                         .child(
                             div()

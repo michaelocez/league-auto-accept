@@ -80,9 +80,51 @@ pub(crate) fn app_mark(t: &Theme) -> impl IntoElement {
         )
 }
 
-impl RenderOnce for TitleBar {
+/// The rail's top strip: the app mark and name. It sits on the navigation rail rather than in a
+/// band across the window, so the rail runs the full height of the app and the title area above the
+/// content stays part of the page. Draggable, like the rest of the title area.
+#[derive(IntoElement)]
+pub struct SidebarHeader {}
+
+impl SidebarHeader {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Default for SidebarHeader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RenderOnce for SidebarHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = Theme::of(cx);
+        div()
+            .flex()
+            .items_center()
+            .gap(theme::space_2())
+            .h(theme::size_title_bar())
+            .w_full()
+            .flex_shrink_0()
+            .px(theme::space_3())
+            .window_control_area(WindowControlArea::Drag)
+            .child(app_mark(&t))
+            .child(
+                div()
+                    .text_size(theme::text_small())
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(t.text)
+                    .child("League Auto Accept"),
+            )
+    }
+}
+
+impl RenderOnce for TitleBar {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        // The leading strip lives on the rail (`SidebarHeader`); what is left here is the draggable
+        // remainder of the title area and the window buttons, drawn straight onto the page.
         div()
             .flex()
             .items_center()
@@ -91,22 +133,10 @@ impl RenderOnce for TitleBar {
             .flex_shrink_0()
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(theme::space_2())
                     .flex_1()
                     .h_full()
                     .min_w(px(0.0))
-                    .px(theme::space_3())
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(app_mark(&t))
-                    .child(
-                        div()
-                            .text_size(theme::text_small())
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(t.text)
-                            .child("League Auto Accept"),
-                    ),
+                    .window_control_area(WindowControlArea::Drag),
             )
             .child(WindowControls::new())
     }
@@ -265,6 +295,7 @@ impl RenderOnce for Sidebar {
             .h_full()
             .flex_shrink_0()
             .bg(t.sidebar_bg)
+            .child(SidebarHeader::new())
             .child(
                 div()
                     .flex()
