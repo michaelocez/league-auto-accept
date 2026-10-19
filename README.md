@@ -144,6 +144,11 @@ The UI observes application state and emits intents; it never owns LCU credentia
 networking. The League backend runs on a background thread and communicates with the UI over a
 channel, so the client being closed or restarted never blocks or crashes the app.
 
+The window layer is `gpui-kit` 0.7 (`gpui = { package = "gpui-kit", … }` in `Cargo.toml`), a
+repackaged snapshot of GPUI rather than Zed's own crates.io crate; it is aliased to `gpui` so the
+imports read normally. The pin is deliberate — GPUI is pre-1.0, so it moves only as its own change,
+with the full validation suite and a Windows build behind it.
+
 ## Security model
 
 - LCU credentials stay in the privileged backend layer; the UI cannot access them — the password is
