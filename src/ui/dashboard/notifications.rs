@@ -189,6 +189,7 @@ impl Dashboard {
             .child(
                 div()
                     .px(theme::space_4())
+                    .pt(theme::space_4())
                     .pb(theme::space_3())
                     .text_size(theme::text_caption())
                     .text_color(t.text_muted)
