@@ -498,3 +498,14 @@ pub fn space_half() -> Pixels {
 pub fn spring_snappy() -> SpringConfig {
     SpringConfig::new(180.0, 26.0, 1.0)
 }
+
+/// Hover alpha for a control whose fill is animated (the toggle's spring), where a flat hover fill
+/// would fight the animation. Controls with flat fills use the state fills instead.
+pub fn hover_alpha() -> f32 {
+    0.92
+}
+
+/// Press alpha, for the same animated-fill controls.
+pub fn press_alpha() -> f32 {
+    0.85
+}

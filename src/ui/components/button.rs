@@ -4,7 +4,9 @@ use std::rc::Rc;
 
 use gpui::base::StyledExt as _;
 use gpui::prelude::*;
-use gpui::{div, App, ClickEvent, ElementId, IntoElement, SharedString, StyleRefinement, Window};
+use gpui::{
+    div, App, ClickEvent, ElementId, IntoElement, Rgba, SharedString, StyleRefinement, Window,
+};
 
 use crate::ui::theme::{self, Theme};
 
@@ -89,29 +91,9 @@ impl RenderOnce for Button {
         let t = Theme::of(cx);
         let disabled = self.disabled;
 
-        // Each variant names all of its states, so a press is a real step past hover rather than an
-        // opacity tweak that stacks with whatever happens to be behind the button.
-        let (bg, fg, hover_bg, active_bg, hover_fg) = match self.variant {
-            ButtonVariant::Primary => (
-                t.accent,
-                t.accent_fg,
-                t.accent_hover,
-                t.accent_active,
-                t.accent_fg,
-            ),
-            ButtonVariant::Secondary => {
-                (t.surface, t.text, t.surface_hover, t.surface_active, t.text)
-            }
-            // A ghost button carries no fill until it is pointed at, and its label steps up to full
-            // contrast at the same moment the fill appears.
-            ButtonVariant::Ghost => (
-                t.surface.with_alpha(0.0),
-                t.text_muted,
-                t.surface_hover,
-                t.surface_active,
-                t.text,
-            ),
-        };
+        // Each variant names all of its states in one place, so a press is a real step past hover
+        // rather than an opacity tweak that stacks with whatever is behind the button.
+        let colors = variant_colors(self.variant, &t);
         let (px_x, py_y) = match self.size {
             ButtonSize::Sm => (theme::space_3(), theme::space_1()),
             ButtonSize::Md => (theme::space_4(), theme::space_2()),
@@ -125,21 +107,18 @@ impl RenderOnce for Button {
             .gap(theme::space_2())
             .px(px_x)
             .py(py_y)
-            .bg(bg)
+            .bg(colors.bg)
             .border_1()
-            .border_color(match self.variant {
-                ButtonVariant::Secondary => t.border,
-                _ => bg,
-            })
+            .border_color(colors.border)
             .rounded(theme::radius_md())
             .text_size(theme::text_body())
-            .text_color(fg)
+            .text_color(colors.fg)
             .font_weight(theme::weight_medium())
             .when(disabled, |this| this.opacity(0.5).cursor_default())
             .when(!disabled, |this| {
                 this.cursor_pointer()
-                    .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
-                    .active(move |style| style.bg(active_bg))
+                    .hover(move |style| style.bg(colors.hover_bg).text_color(colors.hover_fg))
+                    .active(move |style| style.bg(colors.active_bg))
                     .when_some(self.on_click, |this, handler| {
                         this.on_click(move |event, window, app| handler(event, window, app))
                     })
@@ -158,5 +137,125 @@ impl WithAlpha for gpui::Rgba {
     fn with_alpha(mut self, alpha: f32) -> Self {
         self.a = alpha;
         self
+    }
+}
+
+/// One variant's fill, label and border in each state.
+#[derive(Clone, Copy, Debug)]
+struct ButtonColors {
+    bg: Rgba,
+    fg: Rgba,
+    border: Rgba,
+    hover_bg: Rgba,
+    hover_fg: Rgba,
+    active_bg: Rgba,
+}
+
+/// The colour half of a variant, kept as one pure mapping so a variant cannot be paired with a fill
+/// from another state or another variant.
+fn variant_colors(variant: ButtonVariant, t: &Theme) -> ButtonColors {
+    match variant {
+        ButtonVariant::Primary => ButtonColors {
+            bg: t.accent,
+            fg: t.accent_fg,
+            // A filled button hides its hairline by making it the fill.
+            border: t.accent,
+            hover_bg: t.accent_hover,
+            hover_fg: t.accent_fg,
+            active_bg: t.accent_active,
+        },
+        // A secondary button is a bordered surface: on a surface of the same colour the border is
+        // what identifies the control, so it takes the stronger border role. Against white that is
+        // about 1.6:1 — still under WCAG's 3:1 for control boundaries, which would need a border
+        // distinctly darker than this design's restrained separators.
+        ButtonVariant::Secondary => ButtonColors {
+            bg: t.surface,
+            fg: t.text,
+            border: t.border_strong,
+            hover_bg: t.surface_hover,
+            hover_fg: t.text,
+            active_bg: t.surface_active,
+        },
+        // A ghost button carries no fill until it is pointed at, and its label steps up to full
+        // contrast at the same moment the fill appears.
+        ButtonVariant::Ghost => ButtonColors {
+            bg: t.surface.with_alpha(0.0),
+            fg: t.text_muted,
+            border: t.surface.with_alpha(0.0),
+            hover_bg: t.surface_hover,
+            hover_fg: t.text,
+            active_bg: t.surface_active,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both palettes, since every pairing below has to hold in light and dark.
+    fn palettes() -> [Theme; 2] {
+        [Theme::dark(), Theme::light()]
+    }
+
+    fn same(a: Rgba, b: Rgba) -> bool {
+        a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a
+    }
+
+    /// Base, hover and pressed must be three different colours: a press that equals its hover — or a
+    /// hover that equals the base it covers — reads as no feedback at all.
+    #[test]
+    fn every_variant_has_three_distinct_fills() {
+        for t in palettes() {
+            for variant in [
+                ButtonVariant::Primary,
+                ButtonVariant::Secondary,
+                ButtonVariant::Ghost,
+            ] {
+                let c = variant_colors(variant, &t);
+                assert!(
+                    !same(c.bg, c.hover_bg),
+                    "{variant:?} hovers to its own base"
+                );
+                assert!(
+                    !same(c.hover_bg, c.active_bg),
+                    "{variant:?} presses to its own hover"
+                );
+            }
+        }
+    }
+
+    /// A filled button's label must not change on hover: pairing a foreground with a fill from the
+    /// wrong state is exactly what makes text vanish.
+    #[test]
+    fn primary_label_is_stable_across_states() {
+        for t in palettes() {
+            let c = variant_colors(ButtonVariant::Primary, &t);
+            assert!(same(c.fg, t.accent_fg));
+            assert!(same(c.hover_fg, c.fg));
+        }
+    }
+
+    /// A ghost button is the one variant whose label does step up, and only because it gains a fill
+    /// at the same moment.
+    #[test]
+    fn ghost_label_steps_up_only_with_its_fill() {
+        for t in palettes() {
+            let c = variant_colors(ButtonVariant::Ghost, &t);
+            assert!(same(c.fg, t.text_muted));
+            assert!(same(c.hover_fg, t.text));
+            assert!(!same(c.hover_bg, c.bg));
+        }
+    }
+
+    /// A secondary button rests on the surface it sits on and is identified by its border, so its
+    /// base must not be the hover fill it steps to.
+    #[test]
+    fn secondary_rests_on_the_surface_it_borders() {
+        for t in palettes() {
+            let c = variant_colors(ButtonVariant::Secondary, &t);
+            assert!(same(c.bg, t.surface));
+            assert!(same(c.border, t.border_strong));
+        }
     }
 }

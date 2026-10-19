@@ -95,8 +95,8 @@ impl RenderOnce for Toggle {
             .rounded_full()
             .border_1()
             .cursor_pointer()
-            .hover(|style| style.opacity(0.92))
-            .active(|style| style.opacity(0.85))
+            .hover(|style| style.opacity(theme::hover_alpha()))
+            .active(|style| style.opacity(theme::press_alpha()))
             .when_some(self.on_change, |this, handler| {
                 this.on_click(move |event, window, app| handler(event, window, app))
             })
