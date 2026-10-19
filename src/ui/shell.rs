@@ -89,7 +89,6 @@ impl RenderOnce for TitleBar {
             .h(theme::size_title_bar())
             .w_full()
             .flex_shrink_0()
-            .bg(t.sidebar_bg)
             .child(
                 div()
                     .flex()

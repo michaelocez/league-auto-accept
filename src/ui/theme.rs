@@ -209,17 +209,19 @@ impl Theme {
     pub const fn dark_mica() -> Self {
         Self {
             window_bg: rgb_a(0x0a0a0d, 0.0),
-            sidebar_bg: rgb_a(0x0a0a0d, 0.24),
-            bg: rgb_a(0x101014, 0.32),
-            bg_elevated: rgb_a(0x17171c, 0.60),
-            surface: rgb_a(0x141419, 0.56),
-            surface_hover: rgb_a(0x1c1c22, 0.68),
-            surface_active: rgb_a(0x26262e, 0.78),
+            // The rail and the page carry the same tint, so the window reads as one glass sheet and
+            // only the base colour separates them — the rail is defined by its items, not by a band.
+            sidebar_bg: rgb_a(0x0a0a0d, 0.16),
+            bg: rgb_a(0x101014, 0.16),
+            bg_elevated: rgb_a(0x17171c, 0.42),
+            surface: rgb_a(0x141419, 0.38),
+            surface_hover: rgb_a(0x1c1c22, 0.50),
+            surface_active: rgb_a(0x26262e, 0.62),
             border: rgb_a(0xffffff, 0.10),
             border_strong: rgb_a(0xffffff, 0.18),
             // Lighter secondary text so it stays legible over a translucent (not pure-black) ground.
-            text_muted: rgb(0xb6b6bf),
-            text_faint: rgb(0x8c8c95),
+            text_muted: rgb(0xb9b9c2),
+            text_faint: rgb(0x8f8f99),
             ..Self::dark()
         }
     }
@@ -228,12 +230,12 @@ impl Theme {
     pub const fn light_mica() -> Self {
         Self {
             window_bg: rgb_a(0xe9e9ee, 0.0),
-            sidebar_bg: rgb_a(0xe9e9ee, 0.64),
-            bg: rgb_a(0xf5f5f7, 0.66),
-            bg_elevated: rgb_a(0xffffff, 0.84),
-            surface: rgb_a(0xffffff, 0.84),
-            surface_hover: rgb_a(0xececef, 0.90),
-            surface_active: rgb_a(0xe2e2e7, 0.94),
+            sidebar_bg: rgb_a(0xe9e9ee, 0.40),
+            bg: rgb_a(0xf5f5f7, 0.40),
+            bg_elevated: rgb_a(0xffffff, 0.62),
+            surface: rgb_a(0xffffff, 0.62),
+            surface_hover: rgb_a(0xececef, 0.72),
+            surface_active: rgb_a(0xe2e2e7, 0.80),
             border: rgb_a(0x000000, 0.10),
             border_strong: rgb_a(0x000000, 0.18),
             // Darker secondary text so it stays legible over a mid-grey translucent ground.
@@ -249,14 +251,14 @@ impl Theme {
     pub const fn dark_acrylic() -> Self {
         Self {
             window_bg: rgb_a(0x0a0a0d, 0.0),
-            // A more translucent nav rail, but the content ground stays dark so the window reads
-            // dark even over a bright wallpaper.
-            sidebar_bg: rgb_a(0x0a0a0d, 0.34),
-            bg: rgb_a(0x101014, 0.50),
-            bg_elevated: rgb_a(0x17171c, 0.40),
-            surface: rgb_a(0x141419, 0.38),
-            surface_hover: rgb_a(0x1c1c22, 0.52),
-            surface_active: rgb_a(0x26262e, 0.64),
+            // Acrylic blurs what is behind the window, so the tint can sit far back: the rail and
+            // page keep the same light tint and the cards carry just enough to hold text.
+            sidebar_bg: rgb_a(0x0a0a0d, 0.14),
+            bg: rgb_a(0x101014, 0.14),
+            bg_elevated: rgb_a(0x17171c, 0.38),
+            surface: rgb_a(0x141419, 0.34),
+            surface_hover: rgb_a(0x1c1c22, 0.46),
+            surface_active: rgb_a(0x26262e, 0.58),
             border: rgb_a(0xffffff, 0.14),
             border_strong: rgb_a(0xffffff, 0.22),
             text_muted: rgb(0xb6b6bf),
@@ -269,12 +271,12 @@ impl Theme {
     pub const fn light_acrylic() -> Self {
         Self {
             window_bg: rgb_a(0xe9e9ee, 0.0),
-            sidebar_bg: rgb_a(0xe9e9ee, 0.26),
-            bg: rgb_a(0xf5f5f7, 0.46),
-            bg_elevated: rgb_a(0xffffff, 0.70),
-            surface: rgb_a(0xffffff, 0.68),
-            surface_hover: rgb_a(0xececef, 0.78),
-            surface_active: rgb_a(0xe2e2e7, 0.86),
+            sidebar_bg: rgb_a(0xe9e9ee, 0.18),
+            bg: rgb_a(0xf5f5f7, 0.18),
+            bg_elevated: rgb_a(0xffffff, 0.50),
+            surface: rgb_a(0xffffff, 0.48),
+            surface_hover: rgb_a(0xececef, 0.60),
+            surface_active: rgb_a(0xe2e2e7, 0.72),
             border: rgb_a(0x000000, 0.14),
             border_strong: rgb_a(0x000000, 0.24),
             text: rgb(0x121215),
