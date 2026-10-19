@@ -24,11 +24,6 @@ pub enum Appearance {
 impl Global for Appearance {}
 
 impl Appearance {
-    /// Resolves this appearance to its opaque token set.
-    pub fn theme(self) -> Theme {
-        self.theme_with(SurfaceTreatment::Opaque)
-    }
-
     /// Resolves this appearance + surface treatment to a concrete token set.
     pub fn theme_with(self, treatment: SurfaceTreatment) -> Theme {
         match (self, treatment) {
@@ -100,8 +95,6 @@ impl From<SurfaceTreatment> for BackdropMode {
 /// The fully resolved colour tokens for one appearance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
-    /// The window/page background behind everything.
-    pub window_bg: Rgba,
     /// The navigation sidebar surface (slightly offset from the page background).
     pub sidebar_bg: Rgba,
     /// The main content background.
@@ -153,10 +146,8 @@ impl Theme {
 
     pub const fn dark() -> Self {
         Self {
-            // Chrome (title bar + sidebar) sits on the window ground; the content pane is a hair
-            // lighter. The layered fills — not a hairline — are what separate them, so the ground
-            // is deliberately deeper than the surfaces stacked above it.
-            window_bg: rgb(0x0a0a0d),
+            // The rail is the deepest surface; the page beside it is a hair lighter and the cards
+            // step up again, so the layered fills — not a hairline — are what separate them.
             sidebar_bg: rgb(0x0a0a0d),
             bg: rgb(0x101014),
             bg_elevated: rgb(0x17171c),
@@ -181,7 +172,6 @@ impl Theme {
 
     pub const fn light() -> Self {
         Self {
-            window_bg: rgb(0xe9e9ee),
             sidebar_bg: rgb(0xe9e9ee),
             bg: rgb(0xf5f5f7),
             bg_elevated: rgb(0xffffff),
@@ -208,7 +198,6 @@ impl Theme {
     /// opaque so text stays legible while the wallpaper still reads through.
     pub const fn dark_mica() -> Self {
         Self {
-            window_bg: rgb_a(0x0a0a0d, 0.0),
             // The rail and the page carry the same tint, so the window reads as one glass sheet and
             // only the base colour separates them — the rail is defined by its items, not by a band.
             sidebar_bg: rgb_a(0x0a0a0d, 0.16),
@@ -229,7 +218,6 @@ impl Theme {
     /// Light Mica: over a light backdrop, grouped surfaces stay near-opaque to keep text contrast.
     pub const fn light_mica() -> Self {
         Self {
-            window_bg: rgb_a(0xe9e9ee, 0.0),
             sidebar_bg: rgb_a(0xe9e9ee, 0.40),
             bg: rgb_a(0xf5f5f7, 0.40),
             bg_elevated: rgb_a(0xffffff, 0.52),
@@ -250,7 +238,6 @@ impl Theme {
     /// further to let the blurred backdrop read while keeping text contrast.
     pub const fn dark_acrylic() -> Self {
         Self {
-            window_bg: rgb_a(0x0a0a0d, 0.0),
             // Acrylic blurs what is behind the window, so the tint can sit far back: the rail and
             // page keep the same light tint and the cards carry just enough to hold text.
             sidebar_bg: rgb_a(0x0a0a0d, 0.14),
@@ -270,7 +257,6 @@ impl Theme {
     /// Light Acrylic: a translucent nav rail and ground, with cards lifted so text keeps contrast.
     pub const fn light_acrylic() -> Self {
         Self {
-            window_bg: rgb_a(0xe9e9ee, 0.0),
             sidebar_bg: rgb_a(0xe9e9ee, 0.18),
             bg: rgb_a(0xf5f5f7, 0.18),
             bg_elevated: rgb_a(0xffffff, 0.38),

@@ -193,9 +193,15 @@ fn variant_colors(variant: ButtonVariant, t: &Theme) -> ButtonColors {
 mod tests {
     use super::*;
 
-    /// Both palettes, since every pairing below has to hold in light and dark.
-    fn palettes() -> [Theme; 2] {
-        [Theme::dark(), Theme::light()]
+    /// Every palette, since a pairing has to hold in light and dark and under a backdrop — the glass
+    /// sets carry different alphas on the same colour roles.
+    fn palettes() -> [Theme; 4] {
+        [
+            Theme::dark(),
+            Theme::light(),
+            Theme::dark_acrylic(),
+            Theme::light_acrylic(),
+        ]
     }
 
     fn same(a: Rgba, b: Rgba) -> bool {

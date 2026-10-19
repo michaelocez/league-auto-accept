@@ -55,7 +55,7 @@ is rotated to `settings-error.log.1`, and the new one starts empty).
   up to 5 are ever mentioned). A fresh install has only **ready check accepted** switched on, so
   match-found and game-started notifications stay silent until you enable their switches.
 - **Appearance**: on the Settings page choose **Dark** or **Light**, and a window backdrop —
-  **Opaque** (default), **Mica**, or **Acrylic**. Your choices are saved and restored on next
+  **Opaque**, **Mica**, or **Acrylic** (default). Your choices are saved and restored on next
   launch.
 
 ## Configuration

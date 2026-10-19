@@ -1,5 +1,5 @@
-//! `SettingsGroup`: an optional title and a bordered surface of [`super::Row`]s separated by inset
-//! hairlines. The macOS System Settings grouping shape.
+//! `SettingsGroup`: an optional title and one filled surface of [`super::Row`]s, separated by their
+//! own padding rather than by hairlines, so the rows read as a single object.
 
 use gpui::base::StyledExt as _;
 use gpui::prelude::*;

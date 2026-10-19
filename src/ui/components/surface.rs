@@ -16,7 +16,8 @@ pub enum Elevation {
     Raised,
 }
 
-/// A rounded, hairline-bordered container with a token-driven background.
+/// A rounded container with a token-driven background, separated from the page by its fill rather
+/// than by a border.
 #[derive(IntoElement)]
 pub struct Surface {
     base: Div,

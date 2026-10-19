@@ -26,9 +26,10 @@ pub enum ThemeMode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackdropMode {
-    #[default]
     Opaque,
     Mica,
+    /// The default: a translucent window over the desktop.
+    #[default]
     Acrylic,
 }
 
