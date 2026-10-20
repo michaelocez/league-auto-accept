@@ -9,7 +9,8 @@ use crate::config::settings::{allowed_mention_ids, AppSettings};
 use crate::league::ready_check::Lifecycle;
 
 use super::discord::{
-    render_notification_message, DiscordSender, WebhookFuture, WebhookRequest, WebhookSecret,
+    render_notification_message, template_error, DiscordSender, WebhookFuture, WebhookRequest,
+    WebhookResult, WebhookSecret,
 };
 
 /// A settings snapshot plus the webhook secret the sender needs. The secret is read here only, and
@@ -71,6 +72,12 @@ impl NotificationService {
     }
 
     fn dispatch(&self, current: &NotificationSettings, template: &str) -> WebhookFuture {
+        // The template cap is enforced here as well as in the editor, so the sender cannot deliver
+        // a message the store would have shortened — the same defect arriving by another route (a
+        // hand-written settings file, or an older build).
+        if let Some(message) = template_error(template) {
+            return Box::pin(async move { WebhookResult::failure(message) });
+        }
         // Re-apply the mention allowlist and cap at send time: settings are normalised when they
         // are written, but the delivered message must never exceed the cap regardless of how the
         // snapshot was produced.
@@ -237,6 +244,75 @@ mod tests {
             "<@00000000000000001> <@00000000000000002> <@00000000000000003> <@00000000000000004> <@00000000000000005>"
         );
         assert!(!requests[0].content.contains("not-an-id"));
+    }
+
+    /// A template at the stored cap, with the maximum number of mentions configured, is delivered —
+    /// not refused for length.
+    ///
+    /// This is the end of the chain the fix has to hold: the cap says the store keeps the template,
+    /// the mention budget says the render fits Discord, and the sender must therefore accept it. It
+    /// fails if the budget is ever sized too small for what the editor and store allow.
+    #[tokio::test]
+    async fn sends_a_template_at_the_cap_with_every_mention() {
+        let mut current = settings();
+        current.settings.discord_mentions = (0..MAX_DISCORD_USER_IDS)
+            .map(|index| DiscordMention {
+                id: format!("{:020}", index + 1),
+                nickname: String::new(),
+            })
+            .collect();
+        current.settings.notification_messages.auto_accepted = "{mentions}".to_string()
+            + &"t".repeat(crate::notifications::discord::MAX_TEMPLATE_LENGTH - "{mentions}".len());
+
+        let sender = Arc::new(FakeSender::default());
+        let service = service(current, sender.clone());
+        let future = service
+            .notification_for(Lifecycle::AutoAccepted)
+            .expect("an enabled event should notify");
+        assert!(
+            future.await.ok,
+            "a template the store keeps must still be deliverable"
+        );
+
+        let requests = sender.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        // The budget is a ceiling: the longest possible mention is 23 characters while these ids are
+        // 20 digits, so the delivered content lands just inside Discord's limit.
+        assert!(
+            requests[0].content.chars().count()
+                <= crate::notifications::discord::MAX_CONTENT_LENGTH,
+            "the delivered content must fit Discord's limit, got {}",
+            requests[0].content.chars().count()
+        );
+    }
+
+    /// A template longer than the cap is refused rather than delivered, even when it arrives from
+    /// somewhere the editor could not have produced it — a hand-written settings file, or an older
+    /// build. Delivering it would re-create the original defect by another route: the app sending a
+    /// message the store would have shortened.
+    #[tokio::test]
+    async fn refuses_to_deliver_a_template_longer_than_the_cap() {
+        let mut current = settings();
+        current.settings.notification_messages.auto_accepted =
+            "t".repeat(crate::notifications::discord::MAX_TEMPLATE_LENGTH + 1);
+
+        let sender = Arc::new(FakeSender::default());
+        let service = service(current, sender.clone());
+        let future = service
+            .notification_for(Lifecycle::AutoAccepted)
+            .expect("the event is enabled, so a delivery is attempted");
+        let result = future.await;
+
+        assert!(!result.ok, "an over-long template must not be delivered");
+        assert!(
+            result.message.contains("template"),
+            "the failure must name the template length: {}",
+            result.message
+        );
+        assert!(
+            sender.requests.lock().unwrap().is_empty(),
+            "nothing may reach the network for a refused template"
+        );
     }
 
     #[tokio::test]

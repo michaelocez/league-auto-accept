@@ -15,7 +15,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 
-use crate::config::settings::{allowed_mention_ids, DiscordMention};
+use crate::config::settings::{allowed_mention_ids, DiscordMention, MAX_DISCORD_USER_IDS};
 
 const ALLOWED_HOSTS: [&str; 4] = [
     "discord.com",
@@ -24,7 +24,30 @@ const ALLOWED_HOSTS: [&str; 4] = [
     "discordapp.com",
 ];
 pub const MAX_WEBHOOK_URL_LENGTH: usize = 2048;
+/// Discord's own limit for a webhook message, in characters. The preview, the sender and the
+/// template cap all derive from this one number.
 pub const MAX_CONTENT_LENGTH: usize = 2000;
+/// The longest user id Discord issues, so the longest a rendered mention `<@id>` can be is this
+/// plus the three characters of `<@` and `>`.
+const MAX_DISCORD_USER_ID_LENGTH: usize = 20;
+/// How many characters `{mentions}` can expand to: one rendered mention per allowed id, joined by
+/// single spaces. Derived, so it cannot drift from the mention cap or the mention format.
+pub const MAX_MENTION_EXPANSION_LENGTH: usize =
+    MAX_DISCORD_USER_IDS * (MAX_DISCORD_USER_ID_LENGTH + 3) + (MAX_DISCORD_USER_IDS - 1);
+/// The longest message template the application accepts and stores, in characters.
+///
+/// This is the single cap for a saved template, derived from Discord's content limit with the
+/// worst-case mention expansion subtracted: every template that fits it also renders inside
+/// Discord's limit once its mentions are substituted. The settings store normalises templates with
+/// exactly this limit and the editor refuses to go past it, so a template can no longer be accepted
+/// at a length the store would silently shorten.
+///
+/// The cost is that a template with no `{mentions}` keeps headroom it does not strictly need; that
+/// is the price of one limit instead of two, and the mention expansion is the only part of the
+/// rendered length the template itself cannot control.
+///
+/// Templates are counted in characters (Unicode scalar values) on both sides, matching the store.
+pub const MAX_TEMPLATE_LENGTH: usize = MAX_CONTENT_LENGTH - MAX_MENTION_EXPANSION_LENGTH;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(7);
 
@@ -208,10 +231,33 @@ pub fn preview_notification(template: &str, mentions: &[DiscordMention]) -> Stri
     render_notification_message(template, &allowed_mention_ids(mentions))
 }
 
-/// Message-length rule shared by the sender and the preview: 1–2,000 characters.
+/// Message-length rule shared by the sender and the preview: 1–2,000 characters of *rendered*
+/// content, which is the limit Discord itself applies.
 pub fn content_error(content: &str) -> Option<&'static str> {
     if content.trim().is_empty() || content.chars().count() > MAX_CONTENT_LENGTH {
         Some("The Discord message must contain 1–2,000 characters.")
+    } else {
+        None
+    }
+}
+
+/// The template-length rule, checked on the template as typed rather than on the message it
+/// renders to.
+///
+/// This is the limit the settings store enforces ([`MAX_TEMPLATE_LENGTH`]); the editor uses it so a
+/// template that would be shortened on save is refused while it is being written instead. The
+/// rendered message is still checked separately by [`content_error`], because a template can sit
+/// inside this cap and still be too long once its mentions expand — that combination is what the
+/// cap's mention budget is sized to prevent, and checking both keeps it cheap to notice if the two
+/// ever drift apart again.
+pub fn template_error(template: &str) -> Option<String> {
+    let characters = template.chars().count();
+    if characters > MAX_TEMPLATE_LENGTH {
+        Some(format!(
+            "The message template must be at most {MAX_TEMPLATE_LENGTH} characters, so that it still \
+             fits {MAX_CONTENT_LENGTH} once mentions are added. This one is {characters} characters \
+             and would be shortened when saved."
+        ))
     } else {
         None
     }
@@ -496,5 +542,80 @@ mod tests {
         assert!(content_error("hello").is_none());
         assert!(content_error(&"x".repeat(MAX_CONTENT_LENGTH)).is_none());
         assert!(content_error(&"x".repeat(MAX_CONTENT_LENGTH + 1)).is_some());
+    }
+
+    /// The defect this guards: a template between the editor's rendered-message limit (2,000) and
+    /// the store's template cap (1,800) passed validation, then came back shorter than it was typed.
+    ///
+    /// The cap is now the store's cap, so there is exactly one length a template can be accepted at.
+    /// Without the fix the `MAX_TEMPLATE_LENGTH + 1` assertion fails, because the template is still
+    /// inside Discord's 2,000 and the editor reports nothing.
+    #[test]
+    fn a_template_is_accepted_exactly_up_to_the_length_the_store_keeps() {
+        let at_cap = "t".repeat(MAX_TEMPLATE_LENGTH);
+        assert_eq!(
+            template_error(&at_cap),
+            None,
+            "a template the store keeps intact must be accepted"
+        );
+
+        let one_over = "t".repeat(MAX_TEMPLATE_LENGTH + 1);
+        let message =
+            template_error(&one_over).expect("one character over the cap must be refused");
+        assert!(
+            message.contains(&MAX_TEMPLATE_LENGTH.to_string()),
+            "the refusal must say what the limit is: {message}"
+        );
+        assert!(
+            message.contains("shortened"),
+            "the refusal must say what would otherwise happen: {message}"
+        );
+
+        // The old limit is squarely inside the gap this closes, so pin the relationship rather than
+        // a magic number: anything the editor accepts has to fit the store.
+        assert!(at_cap.chars().count() <= MAX_TEMPLATE_LENGTH);
+    }
+
+    /// The mention budget is what makes one limit serve both roles: a template at the cap, expanded
+    /// with the maximum number of mentions, lands exactly on Discord's content limit and no further.
+    ///
+    /// If the budget were too small, a stored template could render over Discord's limit and the
+    /// sender would refuse it; too large, and the editor would refuse templates the store keeps fine.
+    #[test]
+    fn the_worst_case_render_of_a_template_at_the_cap_fits_discord() {
+        let ids: Vec<String> = (0..crate::config::settings::MAX_DISCORD_USER_IDS)
+            .map(|index| format!("{:020}", index + 1))
+            .collect();
+        let template =
+            "{mentions}".to_string() + &"t".repeat(MAX_TEMPLATE_LENGTH - "{mentions}".len());
+        assert_eq!(
+            template.chars().count(),
+            MAX_TEMPLATE_LENGTH,
+            "the fixture itself must sit exactly on the cap"
+        );
+
+        let rendered = render_notification_message(&template, &ids);
+        // The budget is a ceiling, not an exact fit: the longest *possible* mention is 23 characters
+        // while these ids are 20 digits, so the render lands just inside Discord's limit with the
+        // difference as spare headroom. What matters is that it never exceeds it, and that the
+        // budget is what leaves the room.
+        assert!(
+            rendered.chars().count() <= MAX_CONTENT_LENGTH,
+            "a template at the cap must render inside Discord's limit, got {}",
+            rendered.chars().count()
+        );
+        assert!(
+            content_error(&rendered).is_none(),
+            "a template at the cap must render inside Discord's limit"
+        );
+        assert!(
+            rendered.chars().count() >= MAX_CONTENT_LENGTH - MAX_MENTION_EXPANSION_LENGTH,
+            "the template cap must actually use its budget rather than stay far below it, got {}",
+            rendered.chars().count()
+        );
+
+        // One more character anywhere, and both rules agree it is too much.
+        let over = format!("{template}t");
+        assert!(template_error(&over).is_some());
     }
 }

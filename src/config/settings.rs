@@ -6,9 +6,34 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::notifications::discord::MAX_TEMPLATE_LENGTH;
+
 pub const MAX_DISCORD_USER_IDS: usize = 5;
 pub const MAX_DISCORD_NICKNAME_LENGTH: usize = 40;
-pub const MAX_NOTIFICATION_MESSAGE_LENGTH: usize = 1800;
+
+/// A length limit for one stored settings field.
+///
+/// Passing the limit as a named choice rather than a plain number is what keeps a call site from
+/// silently enforcing a different cap than it means to: the three message templates are normalised
+/// with exactly the limit the editor enforces and the sender accepts, and that is the whole point
+/// of the type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoredLength {
+    /// A notification message template, capped at [`MAX_TEMPLATE_LENGTH`].
+    Template,
+    /// A mention's displayed nickname, capped at [`MAX_DISCORD_NICKNAME_LENGTH`].
+    Nickname,
+}
+
+impl StoredLength {
+    /// The cap itself, in characters, for comparing against a `chars().count()`.
+    fn chars(self) -> usize {
+        match self {
+            Self::Template => MAX_TEMPLATE_LENGTH,
+            Self::Nickname => MAX_DISCORD_NICKNAME_LENGTH,
+        }
+    }
+}
 
 /// Current settings schema version.
 pub const SCHEMA_VERSION: u32 = 3;
@@ -142,19 +167,19 @@ pub fn normalize_settings(value: &Value, fallback: &AppSettings) -> AppSettings 
                 messages,
                 "queuePopped",
                 &fallback.notification_messages.queue_popped,
-                MAX_NOTIFICATION_MESSAGE_LENGTH,
+                StoredLength::Template,
             ),
             auto_accepted: string(
                 messages,
                 "autoAccepted",
                 &fallback.notification_messages.auto_accepted,
-                MAX_NOTIFICATION_MESSAGE_LENGTH,
+                StoredLength::Template,
             ),
             game_started: string(
                 messages,
                 "gameStarted",
                 &fallback.notification_messages.game_started,
-                MAX_NOTIFICATION_MESSAGE_LENGTH,
+                StoredLength::Template,
             ),
         },
         minimize_to_tray: boolean(source, "minimizeToTray", fallback.minimize_to_tray),
@@ -243,7 +268,10 @@ fn push_mention(output: &mut Vec<DiscordMention>, id: &str, nickname: &str) {
     if output.iter().any(|mention| mention.id == id) {
         return;
     }
-    let nickname: String = nickname.chars().take(MAX_DISCORD_NICKNAME_LENGTH).collect();
+    let nickname: String = nickname
+        .chars()
+        .take(StoredLength::Nickname.chars())
+        .collect();
     output.push(DiscordMention {
         id: id.to_string(),
         nickname,
@@ -318,13 +346,13 @@ fn string(
     source: Option<&serde_json::Map<String, Value>>,
     key: &str,
     fallback: &str,
-    max_length: usize,
+    max_length: StoredLength,
 ) -> String {
     match source
         .and_then(|object| object.get(key))
         .and_then(Value::as_str)
     {
-        Some(value) => value.chars().take(max_length).collect(),
+        Some(value) => value.chars().take(max_length.chars()).collect(),
         None => fallback.to_string(),
     }
 }
@@ -332,6 +360,7 @@ fn string(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notifications::discord::{MAX_CONTENT_LENGTH, MAX_MENTION_EXPANSION_LENGTH};
     use serde_json::json;
 
     #[test]
@@ -483,5 +512,78 @@ mod tests {
         let merged = merge_settings(&current, &json!({ "windowBackdrop": "acrylic" }));
         assert_eq!(merged.theme_mode, ThemeMode::Light);
         assert_eq!(merged.window_backdrop, BackdropMode::Acrylic);
+    }
+
+    /// The template cap and the mention budget must account for each other exactly.
+    ///
+    /// This is the regression the fix exists for: the store used to cap templates at a flat 1,800
+    /// while the editor validated the *rendered* message against Discord's 2,000, so a template
+    /// between the two was accepted and then silently shortened. Anything that changes either
+    /// number, or the mention format, has to change this derivation too.
+    #[test]
+    fn the_template_cap_leaves_exactly_the_worst_case_mention_budget() {
+        // 5 ids of the longest Discord issues (20 digits), each rendered `<@…>` (23), single-spaced.
+        assert_eq!(MAX_MENTION_EXPANSION_LENGTH, 5 * 23 + 4);
+        assert_eq!(
+            MAX_TEMPLATE_LENGTH + MAX_MENTION_EXPANSION_LENGTH,
+            MAX_CONTENT_LENGTH
+        );
+        // Floors on the shipped values, not just on the relationship: a cap small enough to hurt
+        // ordinary messages must not slip in behind a correct-looking budget sum. Compared through
+        // locals so this stays a runtime assertion on the constant rather than a lintable
+        // constant-expression.
+        let cap = MAX_TEMPLATE_LENGTH;
+        let content_limit = MAX_CONTENT_LENGTH;
+        assert!(
+            cap >= 1000,
+            "a limit this small would be a usability regression: {cap}"
+        );
+        assert!(
+            cap < content_limit,
+            "the cap must stay below Discord's own limit to leave the mention budget room"
+        );
+    }
+
+    /// A shipped default is a template like any other, so it has to fit the cap it is stored under.
+    #[test]
+    fn every_default_template_fits_the_cap() {
+        let defaults = AppSettings::default();
+        for template in [
+            &defaults.notification_messages.queue_popped,
+            &defaults.notification_messages.auto_accepted,
+            &defaults.notification_messages.game_started,
+        ] {
+            assert!(
+                template.chars().count() <= MAX_TEMPLATE_LENGTH,
+                "{template:?} does not fit the cap"
+            );
+        }
+    }
+
+    /// The store keeps a template exactly as long as the editor will accept, and a longer one is
+    /// still clamped (defence in depth for a hand-written file), which is why the editor must not
+    /// accept more than [`MAX_TEMPLATE_LENGTH`].
+    #[test]
+    fn stores_a_template_up_to_the_cap_intact_and_clamps_a_longer_one() {
+        let at_cap = "t".repeat(MAX_TEMPLATE_LENGTH);
+        let stored = normalize_settings(
+            &json!({ "notificationMessages": { "autoAccepted": at_cap } }),
+            &AppSettings::default(),
+        );
+        assert_eq!(
+            stored.notification_messages.auto_accepted.chars().count(),
+            MAX_TEMPLATE_LENGTH,
+            "a template the editor accepts must not be shortened"
+        );
+
+        let one_over = "t".repeat(MAX_TEMPLATE_LENGTH + 1);
+        let clamped = normalize_settings(
+            &json!({ "notificationMessages": { "autoAccepted": one_over } }),
+            &AppSettings::default(),
+        );
+        assert_eq!(
+            clamped.notification_messages.auto_accepted.chars().count(),
+            MAX_TEMPLATE_LENGTH
+        );
     }
 }
