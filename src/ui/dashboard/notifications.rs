@@ -8,7 +8,8 @@ use serde_json::json;
 use crate::app::service::NotificationCommand;
 use crate::config::settings::{is_valid_discord_id, DiscordMention, MAX_DISCORD_USER_IDS};
 use crate::notifications::discord::{
-    content_error, parse_discord_webhook_url, preview_notification,
+    content_error, parse_discord_webhook_url, preview_notification, template_error,
+    MAX_TEMPLATE_LENGTH,
 };
 use crate::ui::components::{Button, ButtonVariant, Row, SettingsGroup};
 use crate::ui::decisions::{self, ToggleSetting, WebhookTestStart};
@@ -230,6 +231,10 @@ impl Dashboard {
 
     /// A message template. The text is validated as it will be sent — with `{mentions}` expanded
     /// and the saved mentions substituted — so what is checked is the message Discord receives.
+    ///
+    /// The field also carries the stored cap as its own validator (see `Dashboard::template_input`),
+    /// and the character count is shown, so the length the store keeps is visible rather than
+    /// discovered when a saved template comes back shorter.
     fn message_row(
         &self,
         label: &'static str,
@@ -238,14 +243,29 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> Row {
         let t = Theme::of(cx);
-        let rendered = preview_notification(&template.read(cx).value(), mentions);
-        let error = content_error(&rendered);
+        let value = template.read(cx).value();
+        let characters = value.chars().count();
+        let rendered = preview_notification(&value, mentions);
+        // Being over the stored cap is the more specific problem, so it is the one reported.
+        let error = template_error(&value).or_else(|| content_error(&rendered).map(str::to_string));
+        let counter = div()
+            .text_size(theme::text_caption())
+            .text_color(if characters > MAX_TEMPLATE_LENGTH {
+                t.danger
+            } else {
+                t.text_muted
+            })
+            .child(format!("{characters} / {MAX_TEMPLATE_LENGTH} characters"));
 
         Row::new(label)
             .child(
                 div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme::space_1())
                     .max_w(theme::size_field_max())
-                    .child(Self::input_frame(template, cx)),
+                    .child(Self::input_frame(template, cx))
+                    .child(counter),
             )
             .when_some(error, |this, message| {
                 this.child(

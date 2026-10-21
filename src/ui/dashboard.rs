@@ -24,6 +24,7 @@ use crate::app::service::NotificationCommand;
 use crate::app::state::AppState;
 use crate::config::settings::{AppSettings, BackdropMode};
 use crate::config::store::{save_error_message, SettingsStore};
+use crate::notifications::discord::MAX_TEMPLATE_LENGTH;
 use crate::platform::glass;
 use crate::platform::tray::TrayCommand;
 use crate::platform::window as platform_window;
@@ -148,6 +149,10 @@ impl Dashboard {
     }
 
     /// An input pre-filled with a saved message template.
+    ///
+    /// The stored cap is applied as a validator too, so the field cannot be made longer than the
+    /// length the store keeps: an edit that would exceed [`MAX_TEMPLATE_LENGTH`] is refused rather
+    /// than accepted and then quietly shortened on the next write.
     fn template_input(
         value: &str,
         placeholder: &'static str,
@@ -156,7 +161,9 @@ impl Dashboard {
     ) -> Entity<InputState> {
         let value = value.to_string();
         cx.new(move |cx| {
-            let mut state = InputState::new(window, cx).placeholder(placeholder);
+            let mut state = InputState::new(window, cx)
+                .placeholder(placeholder)
+                .validate(|candidate, _| candidate.chars().count() <= MAX_TEMPLATE_LENGTH);
             state.set_value(value, window, cx);
             state
         })
