@@ -19,7 +19,9 @@ use gpui::{
 
 use league_auto_accept::app::events::{AppEvent, EventOutcome};
 use league_auto_accept::app::service::spawn_league_service;
-use league_auto_accept::config::store::{default_settings_directory, SettingsStore};
+use league_auto_accept::config::store::{
+    default_settings_directory, load_error_message, SettingsStore,
+};
 use league_auto_accept::notifications::discord::WebhookSecret;
 use league_auto_accept::platform::tray::TrayCommand;
 use league_auto_accept::platform::{single_instance, tray, window as platform_window};
@@ -46,11 +48,21 @@ fn main() {
         webhook.clone(),
     )));
     // Say where settings live: a refused write is otherwise only reported as an I/O error.
-    log::info!("settings file: {}", store.borrow().path().display());
-    let settings = store.borrow_mut().load().unwrap_or_else(|error| {
-        log::error!("failed to load settings, using defaults: {error}");
-        Default::default()
-    });
+    let settings_path = store.borrow().path().to_path_buf();
+    log::info!("settings file: {}", settings_path.display());
+    // A failed read is degraded, not fatal: the session runs on defaults, the store refuses every
+    // later write so those defaults never replace the real file, and the banner explains it from the
+    // first frame instead of only logging it.
+    let (settings, settings_error) = match store.borrow_mut().load() {
+        Ok(settings) => (settings, None),
+        Err(error) => {
+            log::error!("failed to load settings, using defaults and refusing to save: {error}");
+            (
+                Default::default(),
+                Some(load_error_message(&settings_path, &error)),
+            )
+        }
+    };
 
     let (tx, rx) = async_channel::unbounded::<AppEvent>();
 
@@ -130,6 +142,7 @@ fn main() {
                     cx.new(|cx| {
                         Dashboard::new(
                             settings,
+                            settings_error,
                             store,
                             enabled_flag,
                             settings_shared,
