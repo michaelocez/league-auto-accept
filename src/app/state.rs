@@ -98,6 +98,13 @@ impl AppState {
         }
     }
 
+    /// Seeds the error banner with a message that was produced before this state existed — the
+    /// failed settings load that `main` performs before the view is built.
+    pub fn with_settings_error(mut self, message: Option<String>) -> Self {
+        self.settings_error = message;
+        self
+    }
+
     /// Applies a headless-service event to application state.
     pub fn apply_service_event(&mut self, event: &ServiceEvent) {
         match event {
@@ -239,5 +246,20 @@ mod tests {
         assert!(state.webhook_status.configured);
         let rendered = format!("{state:?}");
         assert!(!rendered.contains("secret-token-value"), "{rendered}");
+    }
+
+    /// The settings load runs before the view exists, so the banner a failed read produces has to be
+    /// seeded through the state itself rather than set after a first render.
+    #[test]
+    fn a_failed_settings_load_can_seed_the_banner_before_the_view_exists() {
+        let message = "Settings could not be read from settings.json — denied.".to_string();
+
+        let seeded = AppState::new(AppSettings::default(), WebhookStatus::default())
+            .with_settings_error(Some(message.clone()));
+        assert_eq!(seeded.settings_error.as_deref(), Some(message.as_str()));
+
+        let clean = AppState::new(AppSettings::default(), WebhookStatus::default())
+            .with_settings_error(None);
+        assert_eq!(clean.settings_error, None);
     }
 }

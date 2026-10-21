@@ -32,6 +32,11 @@ pub enum StoreError {
     InvalidWebhook,
     /// The webhook secret could not be protected for storage, so nothing was written.
     Secret(SecretError),
+    /// The settings file could not be *read*, so this store refuses to write anything over it. The
+    /// string is the cause of that failed read, so the banner can name it.
+    LoadFailed {
+        cause: String,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -41,6 +46,10 @@ impl std::fmt::Display for StoreError {
             StoreError::Json(error) => write!(f, "settings JSON error: {error}"),
             StoreError::InvalidWebhook => write!(f, "the Discord webhook URL is not valid"),
             StoreError::Secret(error) => write!(f, "{error}"),
+            StoreError::LoadFailed { cause } => write!(
+                f,
+                "the settings file could not be read ({cause}); changes are not being saved"
+            ),
         }
     }
 }
@@ -65,12 +74,38 @@ impl From<serde_json::Error> for StoreError {
     }
 }
 
+/// Whether this store ever managed to read the settings file.
+///
+/// A failed *read* means the in-memory settings are defaults that the user never chose, so the store
+/// must never write them anywhere: the file on disk is the only copy of what the user had.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LoadState {
+    /// `load` has not run yet, so the file's readability is unknown and a save behaves as it always
+    /// has (this is what the refusal tests exercise directly).
+    Unloaded,
+    /// The file — or its absence, on a first run — was read successfully. Saves behave normally.
+    Loaded,
+    /// The initial read failed for a reason other than absence: every save is refused until restart.
+    Degraded { cause: String },
+}
+
+impl LoadState {
+    /// The cause of the failed read, when there was one.
+    fn degraded_cause(&self) -> Option<&str> {
+        match self {
+            LoadState::Degraded { cause } => Some(cause),
+            LoadState::Unloaded | LoadState::Loaded => None,
+        }
+    }
+}
+
 /// Per-user settings store.
 pub struct SettingsStore {
     path: PathBuf,
     codec: Box<dyn SecretCodec>,
     settings: AppSettings,
     webhook: Arc<RwLock<WebhookSecret>>,
+    load_state: LoadState,
 }
 
 impl SettingsStore {
@@ -111,6 +146,7 @@ impl SettingsStore {
             codec,
             settings: AppSettings::default(),
             webhook,
+            load_state: LoadState::Unloaded,
         }
     }
 
@@ -123,11 +159,15 @@ impl SettingsStore {
     /// Recovering to defaults must never destroy what the user had: a file that cannot be parsed is
     /// moved to `settings.json.invalid` first, so a webhook, mention list or preference lost to one
     /// malformed byte stays recoverable. A file that merely cannot be *read* right now — a lock, an
-    /// antivirus scan, a permission the user will fix — is left untouched, and the caller keeps
-    /// running on defaults in memory until the next successful load.
+    /// antivirus scan, a permission the user will fix — is left untouched, the caller keeps running
+    /// on defaults in memory, and the store is left degraded so that nothing it holds in memory is
+    /// ever written over the real file.
     pub fn load(&mut self) -> Result<AppSettings, StoreError> {
         match self.try_load() {
-            Ok(()) => Ok(self.snapshot()),
+            Ok(()) => {
+                self.load_state = LoadState::Loaded;
+                Ok(self.snapshot())
+            }
             Err(StoreError::Json(error)) => {
                 log::warn!(
                     "settings file {} is not valid JSON: {error}",
@@ -136,6 +176,9 @@ impl SettingsStore {
                 self.preserve_unreadable_file()?;
                 self.settings = AppSettings::default();
                 self.replace_webhook(WebhookSecret::default());
+                // Corruption is recovered from, not degraded: the file was readable, and what it
+                // held is preserved beside it.
+                self.load_state = LoadState::Loaded;
                 self.save()?;
                 Ok(self.snapshot())
             }
@@ -143,10 +186,16 @@ impl SettingsStore {
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.settings = AppSettings::default();
                 self.replace_webhook(WebhookSecret::default());
+                self.load_state = LoadState::Loaded;
                 self.save()?;
                 Ok(self.snapshot())
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                self.load_state = LoadState::Degraded {
+                    cause: error.to_string(),
+                };
+                Err(error)
+            }
         }
     }
 
@@ -210,7 +259,21 @@ impl SettingsStore {
     ///
     /// Making the secret a parameter is what lets a webhook change be written first and applied
     /// second: `save` passes the secret already in the handle, and the setters pass the candidate.
+    ///
+    /// Every write goes through here, so this is where a degraded store refuses: it holds defaults
+    /// the user never chose, and writing them would replace a webhook and preferences that are still
+    /// on disk, waiting for whatever blocked the read to clear.
     fn save_with(&self, secret: &WebhookSecret) -> Result<(), StoreError> {
+        // Recovery is deliberately "fix it and restart", not an in-session retry: a reload would
+        // either discard the edits made while the file was unreadable or have to merge them, and
+        // silently replacing live user edits is worse than refusing to save. Refusing also means
+        // nothing is written at all — no temporary file, no backup, no diagnostics log — so the
+        // settings file stays byte-identical until the user restarts.
+        if let Some(cause) = self.load_state.degraded_cause() {
+            return Err(StoreError::LoadFailed {
+                cause: cause.to_string(),
+            });
+        }
         let mut stored = serde_json::to_value(&self.settings)?;
         // A value the OS will not protect is refused here, before anything is written, so the
         // persisted secret and the in-memory handle both keep the value they already had.
@@ -400,8 +463,30 @@ fn restricted_launch_note() -> Option<&'static str> {
     }
 }
 
+/// The user-facing explanation when the settings file could not be *read*.
+///
+/// This is the message seeded into the window's banner before the view exists: without it the app
+/// would silently run on defaults and the user would only find out when their preferences were gone.
+pub fn load_error_message(path: &Path, error: &StoreError) -> String {
+    format!(
+        "Settings could not be read from {} — {error}. The app is running on its defaults and will \
+         not write over that file: fix the problem, then restart the app to load and save your \
+         settings again.",
+        path.display()
+    )
+}
+
 /// The user-facing explanation when settings could not be written.
 pub fn save_error_message(path: &Path, error: &StoreError) -> String {
+    // A degraded store refuses before anything is written — not even the diagnostics log — so this
+    // branch must not send the user to a log that was never written.
+    if let StoreError::LoadFailed { .. } = error {
+        return format!(
+            "Settings could not be saved to {} — {error}. Nothing was written, so the file on disk \
+             is unchanged; fix the problem and restart the app to save settings again.",
+            path.display()
+        );
+    }
     // A refused protection fails before any write is attempted, so this branch must not send the
     // user to a log that was never written. The webhook is the part that could not be stored.
     if matches!(error, StoreError::Secret(_)) {
@@ -487,7 +572,7 @@ pub(super) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::FakeCodec;
+    use super::test_support::{FakeCodec, OTHER_URL, SAMPLE_URL};
     use super::*;
     use crate::config::secret::SecretError;
     use serde_json::json;
@@ -640,6 +725,132 @@ mod tests {
         assert!(matches!(error, StoreError::Io(_)));
         assert!(path.is_dir());
         assert!(!root.path().join("settings.json.invalid").exists());
+    }
+
+    /// Bytes for a settings file the store itself wrote, so the check below compares against a real
+    /// blob — webhook secret included — rather than against a hand-written approximation.
+    fn a_stored_settings_file() -> Vec<u8> {
+        let root = tempdir().unwrap();
+        let mut store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+        store.load().unwrap();
+        store.update(&json!({ "autoAcceptEnabled": true })).unwrap();
+        store.set_webhook(SAMPLE_URL).unwrap();
+        std::fs::read(root.path().join(SETTINGS_FILE_NAME)).unwrap()
+    }
+
+    /// The defect this guards: after a read failure the session ran on defaults, and the next save —
+    /// the exit flush included — wrote those defaults over the user's real webhook and preferences.
+    /// A degraded store must refuse every write and leave the file byte-identical instead.
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_never_written_over() {
+        let root = tempdir().unwrap();
+        let path = root.path().join(SETTINGS_FILE_NAME);
+
+        // The fixture the other refusal tests use: a directory where the settings file belongs, which
+        // cannot be read as settings. (A read-only file is still readable on Windows, and std cannot
+        // request a share mode that denies a read, so this is the admin-free way to force one.)
+        std::fs::create_dir(&path).unwrap();
+        let mut store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+        store
+            .load()
+            .expect_err("a directory cannot be read as settings");
+        assert!(
+            matches!(store.load_state, LoadState::Degraded { .. }),
+            "a failed read leaves the store degraded"
+        );
+        std::fs::remove_dir(&path).unwrap();
+
+        // The lock has cleared and a real settings file is on disk again — exactly the moment the
+        // old code persisted its defaults over it.
+        let contents = a_stored_settings_file();
+        std::fs::write(&path, &contents).unwrap();
+
+        let error = store.save().expect_err("a degraded store refuses to write");
+        assert!(matches!(error, StoreError::LoadFailed { .. }), "{error}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            contents,
+            "the settings file is byte-identical"
+        );
+
+        // Nothing ran: no temporary, no backup, no preserved copy, and not even the diagnostics log
+        // an ordinary refused write records.
+        assert!(!root.path().join("settings.json.tmp").exists());
+        assert!(!root.path().join("settings.json.bak").exists());
+        assert!(!root.path().join("settings.json.invalid").exists());
+        assert!(!root.path().join(WRITE_ERROR_LOG).exists());
+
+        // A settings change and a webhook change are refused the same way, and change nothing.
+        assert!(matches!(
+            store.update(&json!({ "autoAcceptEnabled": true })),
+            Err(StoreError::LoadFailed { .. })
+        ));
+        assert!(matches!(
+            store.set_webhook(OTHER_URL),
+            Err(StoreError::LoadFailed { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), contents);
+    }
+
+    /// The guard against over-refusing: a settings file that reads cleanly must load and keep saving
+    /// exactly as it always did.
+    #[test]
+    fn a_readable_settings_file_still_loads_and_saves() {
+        use crate::config::settings::ThemeMode;
+
+        let root = tempdir().unwrap();
+        let path = root.path().join(SETTINGS_FILE_NAME);
+        std::fs::write(&path, a_stored_settings_file()).unwrap();
+
+        let mut store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+        let loaded = store.load().expect("a readable settings file loads");
+        assert!(loaded.auto_accept_enabled, "the stored settings were read");
+        assert_eq!(store.load_state, LoadState::Loaded);
+
+        store
+            .update(&json!({ "themeMode": "light" }))
+            .expect("a loaded store still saves");
+
+        let reloaded = SettingsStore::new(root.path(), Box::new(FakeCodec))
+            .load()
+            .unwrap();
+        assert!(reloaded.auto_accept_enabled);
+        assert_eq!(reloaded.theme_mode, ThemeMode::Light);
+    }
+
+    /// The banner is the only place the user learns why nothing is being saved, so the refusal has to
+    /// name the read failure that caused it — and promise nothing that was not written.
+    #[test]
+    fn the_refused_save_names_the_read_failure_for_the_banner() {
+        let root = tempdir().unwrap();
+        let path = root.path().join(SETTINGS_FILE_NAME);
+        std::fs::create_dir(&path).unwrap();
+        let mut store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+        let load_error = store
+            .load()
+            .expect_err("a directory cannot be read as settings");
+
+        let refused = store.save().expect_err("a degraded store refuses to write");
+        let StoreError::LoadFailed { cause } = &refused else {
+            panic!("expected a degraded refusal, got {refused}");
+        };
+        assert!(cause.contains(&load_error.to_string()), "{cause}");
+
+        let message = save_error_message(&path, &refused);
+        assert!(message.contains("could not be saved"), "{message}");
+        assert!(message.contains("could not be read"), "{message}");
+        assert!(message.contains("changes are not being saved"), "{message}");
+        assert!(message.contains(cause.as_str()), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        // Nothing is written while degraded, so no log entry exists to point the user at.
+        assert!(!message.contains(WRITE_ERROR_LOG), "{message}");
+
+        // The startup banner, seeded before the view exists, explains the read failure itself.
+        let startup = load_error_message(&path, &load_error);
+        assert!(startup.contains("could not be read"), "{startup}");
+        assert!(startup.contains(&path.display().to_string()), "{startup}");
+        assert!(startup.contains("running on its defaults"), "{startup}");
+        assert!(!startup.contains(WRITE_ERROR_LOG), "{startup}");
     }
 
     #[test]

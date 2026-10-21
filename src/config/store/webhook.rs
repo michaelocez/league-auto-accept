@@ -94,9 +94,9 @@ pub fn webhook_error_message(action: &str, error: &StoreError) -> String {
         return "That is not a valid Discord webhook URL, so the webhook was left as it was."
             .to_string();
     }
-    // A refused protection fails before any write is attempted, so this branch must not send the
-    // user to a log that was never written.
-    if matches!(error, StoreError::Secret(_)) {
+    // A refused protection fails before any write is attempted, and a degraded store refuses before
+    // it even records a diagnostics log, so neither may send the user to a log that was not written.
+    if matches!(error, StoreError::Secret(_) | StoreError::LoadFailed { .. }) {
         return format!(
             "The Discord webhook could not be {action} — {error}. The webhook already stored is \
              still the one in use, and nothing was written."
@@ -397,5 +397,16 @@ mod tests {
         assert!(unprotected.contains("could not be saved"), "{unprotected}");
         assert!(unprotected.contains("nothing was written"), "{unprotected}");
         assert!(!unprotected.contains("settings-error.log"), "{unprotected}");
+
+        // Nor may a degraded store's refusal: it writes nothing at all, the log included.
+        let degraded = webhook_error_message(
+            "saved",
+            &StoreError::LoadFailed {
+                cause: "settings I/O error: denied".into(),
+            },
+        );
+        assert!(degraded.contains("could not be saved"), "{degraded}");
+        assert!(degraded.contains("still the one in use"), "{degraded}");
+        assert!(!degraded.contains("settings-error.log"), "{degraded}");
     }
 }

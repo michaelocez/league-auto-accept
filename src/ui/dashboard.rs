@@ -74,6 +74,7 @@ impl Dashboard {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         settings: AppSettings,
+        settings_error: Option<String>,
         store: Rc<RefCell<SettingsStore>>,
         enabled_flag: Arc<AtomicBool>,
         settings_shared: Arc<RwLock<AppSettings>>,
@@ -126,7 +127,7 @@ impl Dashboard {
         ];
 
         Self {
-            state: AppState::new(settings, webhook_status),
+            state: AppState::new(settings, webhook_status).with_settings_error(settings_error),
             store,
             enabled_flag,
             settings_shared,
