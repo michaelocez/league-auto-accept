@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use rand::RngCore;
@@ -365,7 +365,8 @@ impl LcuEventSocket {
             decoder: WebSocketFrameDecoder::new(MAX_EVENT_BYTES),
             leftover: remainder,
             queue: SocketQueue::default(),
-            ping_outstanding: false,
+            last_activity: Instant::now(),
+            ping_sent: None,
         };
         connection
             .send_frame(0x1, EVENT_SUBSCRIPTION_FRAME.as_bytes())
@@ -461,13 +462,57 @@ impl SocketQueue {
     }
 }
 
+/// What the keepalive clock requires the next read to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeepaliveWait {
+    /// Nothing is due yet; wait at most this long for the next read.
+    Wait(Duration),
+    /// The socket has been silent for `EVENT_IDLE_PING`; send a keepalive ping now.
+    SendPing,
+    /// A keepalive ping has gone unanswered for `EVENT_PONG_TIMEOUT`; the socket is half-open.
+    PongOverdue,
+}
+
+/// Derives what the keepalive clock requires at `now`.
+///
+/// `last_activity` is when the socket last delivered data (or last had a keepalive ping sent on
+/// it) and `ping_sent` is when an unanswered keepalive ping went out. Both are stored on the
+/// connection rather than kept in the read future, so a caller that drops and recreates that
+/// future cannot push either deadline back.
+///
+/// Kept free of IO and of `Instant::now()` so the deadlines can be tested with injected instants.
+fn keepalive_wait(
+    now: Instant,
+    last_activity: Instant,
+    ping_sent: Option<Instant>,
+) -> KeepaliveWait {
+    let expired = |deadline: Instant| now >= deadline;
+    if let Some(ping_sent) = ping_sent {
+        let deadline = ping_sent + EVENT_PONG_TIMEOUT;
+        return if expired(deadline) {
+            KeepaliveWait::PongOverdue
+        } else {
+            KeepaliveWait::Wait(deadline - now)
+        };
+    }
+    let deadline = last_activity + EVENT_IDLE_PING;
+    if expired(deadline) {
+        KeepaliveWait::SendPing
+    } else {
+        KeepaliveWait::Wait(deadline - now)
+    }
+}
+
 /// A connected LCU event socket.
 pub struct LcuEventConnection {
     tls: tokio_rustls::client::TlsStream<TcpStream>,
     decoder: WebSocketFrameDecoder,
     leftover: Vec<u8>,
     queue: SocketQueue,
-    ping_outstanding: bool,
+    /// When the socket last delivered data, or last had a keepalive ping sent.
+    last_activity: Instant,
+    /// When the outstanding keepalive ping was sent, if it is still unanswered.
+    ping_sent: Option<Instant>,
 }
 
 impl LcuEventConnection {
@@ -491,6 +536,10 @@ impl LcuEventConnection {
     /// answered with a pong and do not surface. When the socket stays silent for
     /// `EVENT_IDLE_PING` a keepalive ping is sent; if it stays silent for `EVENT_PONG_TIMEOUT`
     /// afterwards the connection is treated as dead so the service can reconnect.
+    ///
+    /// Both deadlines are measured from timestamps stored on the connection, so a caller that
+    /// drops this future and calls again — the service's poll tick does — resumes them rather
+    /// than restarting them.
     pub async fn next_event(&mut self) -> Result<SocketEvent, TransportError> {
         loop {
             if let Some(event) = self.queue.pop() {
@@ -501,28 +550,33 @@ impl LcuEventConnection {
             }
 
             let chunk = if self.leftover.is_empty() {
-                let mut buffer = [0u8; 8192];
-                let wait = if self.ping_outstanding {
-                    EVENT_PONG_TIMEOUT
-                } else {
-                    EVENT_IDLE_PING
+                let wait = match keepalive_wait(Instant::now(), self.last_activity, self.ping_sent)
+                {
+                    KeepaliveWait::Wait(wait) => wait,
+                    KeepaliveWait::SendPing => {
+                        self.send_frame(0x9, &[]).await?;
+                        let now = Instant::now();
+                        self.ping_sent = Some(now);
+                        self.last_activity = now;
+                        continue;
+                    }
+                    KeepaliveWait::PongOverdue => return Err(TransportError::Timeout),
                 };
+                let mut buffer = [0u8; 8192];
                 match tokio::time::timeout(wait, self.tls.read(&mut buffer)).await {
                     Ok(Ok(0)) => return Ok(SocketEvent::Closed),
                     Ok(Ok(read)) => {
-                        self.ping_outstanding = false;
+                        self.last_activity = Instant::now();
+                        self.ping_sent = None;
                         buffer[..read].to_vec()
                     }
                     Ok(Err(error)) => return Err(TransportError::Io(error.to_string())),
-                    Err(_) if self.ping_outstanding => return Err(TransportError::Timeout),
-                    Err(_) => {
-                        self.send_frame(0x9, &[]).await?;
-                        self.ping_outstanding = true;
-                        continue;
-                    }
+                    // The timer fired; let the stored deadline decide what that means rather
+                    // than assuming the wait it was given was the right one.
+                    Err(_) => continue,
                 }
             } else {
-                self.ping_outstanding = false;
+                self.ping_sent = None;
                 std::mem::take(&mut self.leftover)
             };
 
@@ -700,5 +754,119 @@ mod tests {
         assert_eq!(queue.pop(), Some(SocketEvent::Closed));
         assert_eq!(queue.pop(), None);
         assert!(queue.is_closed());
+    }
+
+    // The keepalive clock is pure, so its deadlines are pinned here with injected instants
+    // rather than by sleeping.
+
+    #[test]
+    fn a_fresh_connection_waits_a_full_ping_interval() {
+        let base = Instant::now();
+        assert_eq!(
+            keepalive_wait(base, base, None),
+            KeepaliveWait::Wait(EVENT_IDLE_PING)
+        );
+    }
+
+    #[test]
+    fn a_partially_idle_connection_waits_only_the_remainder() {
+        let base = Instant::now();
+        let now = base + Duration::from_secs(25);
+        assert_eq!(
+            keepalive_wait(now, base, None),
+            KeepaliveWait::Wait(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn an_idle_connection_past_the_ping_interval_pings_at_once() {
+        let base = Instant::now();
+        // Exactly on the deadline still means "send it now": a zero-length wait would spin.
+        for elapsed in [EVENT_IDLE_PING, EVENT_IDLE_PING + Duration::from_secs(1)] {
+            assert_eq!(
+                keepalive_wait(base + elapsed, base, None),
+                KeepaliveWait::SendPing,
+                "idle for {elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_outstanding_ping_waits_the_rest_of_the_pong_window() {
+        let base = Instant::now();
+        let ping_sent = base + Duration::from_secs(30);
+        let now = ping_sent + Duration::from_secs(5);
+        assert_eq!(
+            keepalive_wait(now, ping_sent, Some(ping_sent)),
+            KeepaliveWait::Wait(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn an_unanswered_ping_is_overdue_at_the_pong_deadline() {
+        let base = Instant::now();
+        let ping_sent = base + Duration::from_secs(30);
+        for elapsed in [
+            EVENT_PONG_TIMEOUT,
+            EVENT_PONG_TIMEOUT + Duration::from_secs(1),
+        ] {
+            assert_eq!(
+                keepalive_wait(ping_sent + elapsed, ping_sent, Some(ping_sent)),
+                KeepaliveWait::PongOverdue,
+                "unanswered for {elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_late_ping_is_not_resent_once_the_pong_window_is_gone() {
+        let base = Instant::now();
+        let ping_sent = base + Duration::from_secs(30);
+        // Both clocks have expired; the outstanding ping wins, so the connection is reported
+        // dead instead of being pinged a second time.
+        let now = ping_sent + Duration::from_secs(45);
+        assert_eq!(
+            keepalive_wait(now, ping_sent, Some(ping_sent)),
+            KeepaliveWait::PongOverdue
+        );
+    }
+
+    #[test]
+    fn data_received_restarts_the_idle_clock() {
+        let base = Instant::now();
+        let received = base + Duration::from_secs(29);
+        assert_eq!(
+            keepalive_wait(received, base, None),
+            KeepaliveWait::Wait(Duration::from_secs(1))
+        );
+        // The read becomes the new activity stamp, and it clears any outstanding ping too.
+        assert_eq!(
+            keepalive_wait(received, received, None),
+            KeepaliveWait::Wait(EVENT_IDLE_PING)
+        );
+    }
+
+    /// Regression for the inert keepalive: the service's poll tick drops the read future every
+    /// three seconds. The deadline is anchored to `last_activity`, so recreating the future
+    /// waits three seconds less instead of restarting the full interval.
+    #[test]
+    fn recreating_the_wait_shrinks_the_deadline_instead_of_restarting_it() {
+        let base = Instant::now();
+        let first = keepalive_wait(base, base, None);
+        let KeepaliveWait::Wait(first_wait) = first else {
+            panic!("a fresh connection should wait, got {first:?}");
+        };
+
+        let tick = base + Duration::from_secs(3);
+        let second = keepalive_wait(tick, base, None);
+        let KeepaliveWait::Wait(second_wait) = second else {
+            panic!("a three-second-old connection should still wait, got {second:?}");
+        };
+
+        assert_eq!(first_wait, EVENT_IDLE_PING);
+        assert_eq!(second_wait, EVENT_IDLE_PING - Duration::from_secs(3));
+        assert_eq!(first_wait - second_wait, Duration::from_secs(3));
+        // Both calls aim at the same absolute deadline.
+        assert_eq!(base + first_wait, tick + second_wait);
     }
 }
