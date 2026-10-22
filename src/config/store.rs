@@ -2,8 +2,11 @@
 //!
 //! Writes are atomic (temp file + rename), a malformed file is preserved as `settings.json.invalid`
 //! before defaults replace it, and a refused write is explained through a bounded diagnostics log.
-//! The webhook's own persistence lives in a private `webhook` child module — a child so the store's
-//! fields stay private — and the Windows token query the diagnostics use lives in the crate-private
+//! That last part holds only for a store that *read* its settings: a store whose initial read failed
+//! refuses before it writes anything at all — the diagnostics log included — because the file on disk
+//! is then the only copy of what the user had, so there is nothing to append a note to. The webhook's
+//! own persistence lives in a private `webhook` child module — a child so the store's fields stay
+//! private — and the Windows token query the diagnostics use lives in the crate-private
 //! `platform::integrity` module.
 
 use std::path::{Path, PathBuf};
@@ -298,22 +301,18 @@ impl SettingsStore {
 
         // A momentary lock — a scanner reading the file, another handle not yet closed — is worth
         // waiting out, because the alternative is a setting the user watched disappear.
-        let mut refusal = None;
-        for _ in 0..REPLACE_ATTEMPTS {
-            match std::fs::rename(&temporary, &self.path) {
-                Ok(()) => {
-                    // A backup written by an earlier in-place save is stale once the atomic
-                    // replacement works again, and nothing ever reads it back.
-                    let _ = std::fs::remove_file(self.path.with_extension("json.bak"));
-                    return Ok(());
-                }
-                Err(error) => {
-                    refusal = Some(error);
-                    std::thread::sleep(REPLACE_RETRY_DELAY);
-                }
+        let refusal = match replace_with_retries(
+            || std::fs::rename(&temporary, &self.path),
+            || std::thread::sleep(REPLACE_RETRY_DELAY),
+        ) {
+            Ok(()) => {
+                // A backup written by an earlier in-place save is stale once the atomic
+                // replacement works again, and nothing ever reads it back.
+                let _ = std::fs::remove_file(self.path.with_extension("json.bak"));
+                return Ok(());
             }
-        }
-        let refusal = refusal.unwrap_or_else(|| std::io::Error::other("not replaced"));
+            Err(error) => error,
+        };
 
         // Being able to open the file itself proves the refusal was about *replacing* it (something
         // holds it without delete sharing) rather than about writing to it, so the same text is
@@ -341,6 +340,38 @@ impl SettingsStore {
 const REPLACE_ATTEMPTS: u32 = 3;
 /// The pause between those attempts.
 const REPLACE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Whether a failed replacement is followed by another attempt, and therefore by the pause between
+/// attempts. There is one fewer pause than attempts: the pause is what gives the next attempt a
+/// reason to exist, so the last one has none.
+fn another_attempt_follows(attempt: u32) -> bool {
+    attempt + 1 < REPLACE_ATTEMPTS
+}
+
+/// Replaces the settings file up to [`REPLACE_ATTEMPTS`] times, pausing between attempts, and
+/// returns the refusal that ended the last one.
+///
+/// The rename and the pause are parameters so the attempt-and-pause schedule can be tested without
+/// a real lock and without sleeping for it.
+fn replace_with_retries(
+    replace: impl Fn() -> std::io::Result<()>,
+    pause: impl Fn(),
+) -> std::io::Result<()> {
+    let mut refusal = None;
+    for attempt in 0..REPLACE_ATTEMPTS {
+        match replace() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                refusal = Some(error);
+                if another_attempt_follows(attempt) {
+                    pause();
+                }
+            }
+        }
+    }
+    Err(refusal.unwrap_or_else(|| std::io::Error::other("not replaced")))
+}
+
 /// The file a refused save records its reason in.
 const WRITE_ERROR_LOG: &str = "settings-error.log";
 /// The write-failure log is a diagnostic aid rather than a history: past this size the live file is
@@ -374,9 +405,17 @@ fn rotate_diagnostics_log(path: &Path) {
 /// A refusal is nearly always specific to the machine rather than to the app — a security product, a
 /// handle held by another program, a restricted token — and a one-line banner cannot tell those
 /// apart, so the facts are written down where they can be read afterwards.
+///
+/// The log is an aid, never the report: if no candidate will accept the line, the refusal is still
+/// returned to the caller and still explained in the banner.
 fn record_write_failure(path: &Path, error: &std::io::Error) {
-    use std::io::Write as _;
+    let line = write_failure_line(path, error);
+    log::error!("{line}");
+    let _ = write_diagnostics_line(&line, &diagnostics_log_candidates(path));
+}
 
+/// The one-line diagnostic: what failed, where, and the machine facts that tell the causes apart.
+fn write_failure_line(path: &Path, error: &std::io::Error) -> String {
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
 
     // A file that can be created in the directory but does not accept a write is the shape of a lock
@@ -398,40 +437,55 @@ fn record_write_failure(path: &Path, error: &std::io::Error) {
     let integrity = process_integrity_level()
         .map(|level| format!("{level:#x}"))
         .unwrap_or_else(|| "unknown".into());
-    let line = format!(
+    format!(
         "settings save refused: {error} | path={} | integrity={integrity} | can create file in directory={can_create_in_directory} | can open existing file for write={can_write_in_place} | {existing}",
         path.display()
-    );
-    log::error!("{line}");
+    )
+}
 
-    // When the settings directory is the thing being refused, a log written there cannot exist —
-    // which is precisely the case worth recording — so the app's own directory and the temporary
-    // directory are tried as well. An unwritable `AppData` is exactly when this matters.
+/// Where the diagnostic is offered, in order.
+///
+/// When the settings directory is the thing being refused, a log written there cannot exist — which
+/// is precisely the case worth recording — so the app's own directory and the temporary directory
+/// are tried as well. An unwritable `AppData` is exactly when this matters.
+fn diagnostics_log_candidates(path: &Path) -> Vec<PathBuf> {
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
     let beside_exe = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|parent| parent.join(WRITE_ERROR_LOG)))
         .unwrap_or_default();
-    let candidates = [
+    [
         directory.join(WRITE_ERROR_LOG),
         beside_exe,
         std::env::temp_dir().join("league-auto-accept-settings-error.log"),
-    ];
+    ]
+    .into_iter()
+    .filter(|candidate| !candidate.as_os_str().is_empty())
+    .collect()
+}
+
+/// Appends `line` to the first candidate that accepts it, returning which one did.
+///
+/// Each candidate is tried from scratch — rotation included — so one unwritable location does not
+/// lose the record while another will still take it, and a rotation that fails still leaves the
+/// candidate's live log usable.
+fn write_diagnostics_line(line: &str, candidates: &[PathBuf]) -> Option<PathBuf> {
+    use std::io::Write as _;
+
     for candidate in candidates {
-        if candidate.as_os_str().is_empty() {
-            continue;
-        }
-        rotate_diagnostics_log(&candidate);
+        rotate_diagnostics_log(candidate);
         let opened = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&candidate);
+            .open(candidate);
         if opened
             .map(|mut log| writeln!(log, "{line}").is_ok())
             .unwrap_or(false)
         {
-            return;
+            return Some(candidate.clone());
         }
     }
+    None
 }
 
 /// Names the step that failed, so the banner says more than "Access is denied".
@@ -576,6 +630,7 @@ mod tests {
     use super::*;
     use crate::config::secret::SecretError;
     use serde_json::json;
+    use std::cell::Cell;
     use tempfile::tempdir;
 
     #[test]
@@ -606,6 +661,223 @@ mod tests {
         assert!(log.contains("can create file in directory=true"));
         assert!(log.contains("can open existing file for write=false"));
         assert!(!root.path().join("settings-write-probe.tmp").exists());
+    }
+
+    /// The retry pauses are what make a second and third attempt possible, so they are spent between
+    /// attempts and not after the last one — a pause there would delay the refusal and the in-place
+    /// fallback by [`REPLACE_RETRY_DELAY`] for no further chance to succeed. Driving the loop with a
+    /// counting pause pins the schedule without sleeping for it.
+    #[test]
+    fn a_failed_replacement_pauses_between_attempts_but_not_after_the_last_one() {
+        let attempts = Cell::new(0);
+        let pauses = Cell::new(0);
+
+        let refusal = replace_with_retries(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(std::io::Error::other("locked"))
+            },
+            || pauses.set(pauses.get() + 1),
+        )
+        .expect_err("every attempt fails");
+
+        assert!(refusal.to_string().contains("locked"), "{refusal}");
+        assert_eq!(attempts.get(), REPLACE_ATTEMPTS, "every attempt is made");
+        assert_eq!(
+            pauses.get(),
+            REPLACE_ATTEMPTS - 1,
+            "the last attempt is not followed by a pause"
+        );
+    }
+
+    /// The other half of the schedule: a replacement that works is neither retried nor paused.
+    #[test]
+    fn a_replacement_that_succeeds_is_not_retried_or_paused() {
+        for succeed_on in 1..=REPLACE_ATTEMPTS {
+            let attempts = Cell::new(0);
+            let pauses = Cell::new(0);
+
+            replace_with_retries(
+                || {
+                    attempts.set(attempts.get() + 1);
+                    if attempts.get() == succeed_on {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::other("locked"))
+                    }
+                },
+                || pauses.set(pauses.get() + 1),
+            )
+            .expect("the replacement eventually succeeds");
+
+            assert_eq!(attempts.get(), succeed_on);
+            assert_eq!(pauses.get(), succeed_on - 1);
+        }
+    }
+
+    /// The measurement behind the cost reduction: one refused save plus the banner it produces used
+    /// to ask Windows for the process integrity level twice, although it cannot change within a
+    /// process. The second question must not reach Windows at all.
+    #[test]
+    fn a_refused_save_and_its_banner_do_not_query_the_token_twice() {
+        // Settle the cache first, so whether another test has already populated it cannot decide
+        // this one — and once it is populated, no further query happens in this process.
+        let _ = crate::platform::integrity::process_integrity_level();
+        let before = crate::platform::integrity::token_query_count();
+
+        let root = tempdir().unwrap();
+        std::fs::create_dir(root.path().join(SETTINGS_FILE_NAME)).unwrap();
+        let store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+
+        // The whole refused-save path: the log records the refusal, then the banner explains it.
+        let error = store.save().expect_err("the replacement cannot succeed");
+        let message = save_error_message(store.path(), &error);
+        assert!(message.contains("could not be saved"), "{message}");
+
+        assert_eq!(
+            crate::platform::integrity::token_query_count(),
+            before,
+            "the process token was queried again for a save that cannot change it"
+        );
+    }
+
+    /// A log the settings directory will not accept must not lose the record: the app's directory
+    /// and the temporary directory are tried in turn.
+    #[test]
+    fn a_diagnostics_log_that_cannot_be_created_falls_back_to_the_next_candidate() {
+        let root = tempdir().unwrap();
+        // A directory standing where the log belongs is what a refused or read-only log path looks
+        // like to `OpenOptions`.
+        let blocked = root.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        let usable = root.path().join("usable.log");
+
+        let written = write_diagnostics_line(
+            "settings save refused: test",
+            &[blocked.clone(), usable.clone()],
+        );
+
+        assert_eq!(written.as_deref(), Some(usable.as_path()));
+        let recorded = std::fs::read_to_string(&usable).unwrap();
+        assert!(
+            recorded.contains("settings save refused: test"),
+            "{recorded}"
+        );
+    }
+
+    /// A candidate whose parent directory does not exist cannot be created either, and must not stop
+    /// the next one from taking the line.
+    #[test]
+    fn a_diagnostics_log_in_a_missing_directory_falls_back_to_the_next_candidate() {
+        let root = tempdir().unwrap();
+        let missing = root.path().join("no-such-directory").join(WRITE_ERROR_LOG);
+        let usable = root.path().join("usable.log");
+
+        let written = write_diagnostics_line("line", &[missing.clone(), usable.clone()]);
+
+        assert_eq!(written.as_deref(), Some(usable.as_path()));
+        assert!(!missing.exists());
+    }
+
+    /// When nothing will take the line, the caller still has its refusal and the user still has a
+    /// message: the diagnostics log is an aid, not the report.
+    #[test]
+    fn a_refused_save_is_still_reported_when_no_diagnostics_log_can_be_written() {
+        let root = tempdir().unwrap();
+        // The settings path is a directory, so the replacement is refused...
+        std::fs::create_dir(root.path().join(SETTINGS_FILE_NAME)).unwrap();
+        // ...and the log cannot be created in the settings directory either.
+        std::fs::create_dir(root.path().join(WRITE_ERROR_LOG)).unwrap();
+        let store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+
+        // The fallback writes outside the settings directory, which is the point. Start from a known
+        // state and leave none of it behind, so a rerun cannot see a stale line.
+        let fallbacks = fallback_diagnostics_logs();
+        for candidate in &fallbacks {
+            let _ = std::fs::remove_file(candidate);
+        }
+
+        let error = store.save().expect_err("the replacement cannot succeed");
+
+        assert!(matches!(error, StoreError::Io(_)));
+        assert!(
+            root.path().join(WRITE_ERROR_LOG).is_dir(),
+            "the blocked log path is left as it is"
+        );
+        let holder = fallbacks
+            .iter()
+            .filter(|candidate| {
+                std::fs::read_to_string(candidate)
+                    .is_ok_and(|log| log.contains("settings save refused"))
+            })
+            .count();
+        for candidate in &fallbacks {
+            let _ = std::fs::remove_file(candidate);
+        }
+        assert_eq!(
+            holder, 1,
+            "one fallback must hold the record: {fallbacks:?}"
+        );
+
+        let message = save_error_message(store.path(), &error);
+        assert!(message.contains("could not be saved"), "{message}");
+        assert!(
+            message.contains(&store.path().display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains(WRITE_ERROR_LOG), "{message}");
+    }
+
+    /// The rotation is best-effort. When the oversized log cannot be moved aside, the refusal must
+    /// still be recorded — by appending to the live log — and the save still refused.
+    #[test]
+    fn a_refused_save_is_still_recorded_when_the_log_cannot_be_rotated() {
+        let root = tempdir().unwrap();
+        // The settings path is a directory, so the save is refused and lands in the log.
+        std::fs::create_dir(root.path().join(SETTINGS_FILE_NAME)).unwrap();
+        let store = SettingsStore::new(root.path(), Box::new(FakeCodec));
+
+        let log = root.path().join(WRITE_ERROR_LOG);
+        let oversized = vec![b'x'; WRITE_ERROR_LOG_MAX_BYTES as usize + 1];
+        std::fs::write(&log, &oversized).unwrap();
+        // A directory where the rotation belongs: the rename onto it fails, so the live log cannot
+        // be emptied and the append has to carry on regardless.
+        let rotation = root.path().join("settings-error.log.1");
+        std::fs::create_dir(&rotation).unwrap();
+
+        let error = store.save().expect_err("a directory cannot be replaced");
+
+        assert!(matches!(error, StoreError::Io(_)));
+        assert!(rotation.is_dir(), "the failed rotation target is untouched");
+        let live = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            live.contains("settings save refused"),
+            "the refusal is still recorded in the live log"
+        );
+        assert!(
+            live.starts_with("xxx"),
+            "the old contents were not truncated"
+        );
+
+        let message = save_error_message(store.path(), &error);
+        assert!(message.contains("could not be saved"), "{message}");
+        assert!(message.contains(WRITE_ERROR_LOG), "{message}");
+    }
+
+    /// The two fallback locations [`record_write_failure`] uses when the settings directory refuses
+    /// a log, so a test can see which one took the line and clean it up afterwards.
+    fn fallback_diagnostics_logs() -> Vec<PathBuf> {
+        let beside_exe = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|parent| parent.join(WRITE_ERROR_LOG)))
+            .unwrap_or_default();
+        [
+            beside_exe,
+            std::env::temp_dir().join("league-auto-accept-settings-error.log"),
+        ]
+        .into_iter()
+        .filter(|candidate| !candidate.as_os_str().is_empty())
+        .collect()
     }
 
     #[test]

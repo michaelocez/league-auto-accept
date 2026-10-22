@@ -130,7 +130,9 @@ fn main() {
                 cx,
                 move |window, cx| {
                     if let Some(hwnd) = platform_window::raw_hwnd(window) {
-                        hwnd_slot.store(hwnd as isize, Ordering::SeqCst);
+                        // Release: the handle is the only thing being published to the drain task
+                        // below, so this is the weakest ordering that still hands it over whole.
+                        hwnd_slot.store(hwnd as isize, Ordering::Release);
                     }
                     // Starts empty: the saved webhook is never decrypted into the UI. The row shows
                     // only whether one is configured; typing here sets a new one.
@@ -204,7 +206,9 @@ fn main() {
                 });
                 match outcome {
                     EventOutcome::ShowWindow => {
-                        let raw = hwnd_slot.load(Ordering::SeqCst);
+                        // Acquire: pairs with the Release store above, so the handle is visible here
+                        // even if the drain task is not the thread that created the window.
+                        let raw = hwnd_slot.load(Ordering::Acquire);
                         if raw != 0 {
                             platform_window::show_hwnd(raw);
                         }

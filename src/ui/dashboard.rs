@@ -279,6 +279,7 @@ impl Dashboard {
     /// value that is persisted come from the same decision, so they cannot drift apart.
     fn toggle_auto_accept(&mut self) {
         let change = decisions::auto_accept_change(self.state.settings.auto_accept_enabled);
+        // Relaxed is sufficient: a lone boolean the service re-reads, with nothing published with it.
         self.enabled_flag.store(change.enabled, Ordering::Relaxed);
         self.persist(change.patch);
     }

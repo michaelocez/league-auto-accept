@@ -307,12 +307,14 @@ fn sync_base_theme(cx: &mut App) {
 /// Writes the active appearance to both the GPUI global and the process-local mirror.
 pub fn set_appearance(cx: &mut App, appearance: Appearance) {
     cx.set_global(appearance);
+    // Relaxed is sufficient: a process-local mirror of the global, read on this same thread only.
     ACTIVE.store(appearance as u8, Ordering::Relaxed);
     sync_base_theme(cx);
 }
 
 /// The currently active appearance.
 pub fn current() -> Appearance {
+    // Relaxed is sufficient: as in `set_appearance`, the mirror orders nothing else.
     if ACTIVE.load(Ordering::Relaxed) == Appearance::Light as u8 {
         Appearance::Light
     } else {
@@ -323,12 +325,14 @@ pub fn current() -> Appearance {
 /// Writes the active surface treatment to both the GPUI global and the process-local mirror.
 pub fn set_treatment(cx: &mut App, treatment: SurfaceTreatment) {
     cx.set_global(treatment);
+    // Relaxed is sufficient: a process-local mirror of the global, read on this same thread only.
     TREATMENT.store(treatment as u8, Ordering::Relaxed);
     sync_base_theme(cx);
 }
 
 /// The currently active surface treatment.
 pub fn current_treatment() -> SurfaceTreatment {
+    // Relaxed is sufficient: as in `set_treatment`, the mirror orders nothing else.
     match TREATMENT.load(Ordering::Relaxed) {
         1 => SurfaceTreatment::Mica,
         2 => SurfaceTreatment::Acrylic,
