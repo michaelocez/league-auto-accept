@@ -33,7 +33,12 @@ pub trait SecretCodec: Send + Sync {
     fn decode(&self, secret: &StoredSecret) -> String;
 }
 
-/// A no-protection codec (used on non-Windows and in tests).
+/// A no-protection codec: the host seam that lets this Windows-only crate be checked and tested
+/// anywhere, and keeps its pure codec logic testable without DPAPI.
+///
+/// It must never be reachable in a Windows build. `default_secret_codec` selects it only under
+/// `cfg(not(windows))`, and nothing else constructs it — storing the webhook in cleartext on the
+/// machine that actually runs the app is exactly what the DPAPI refusal exists to prevent.
 pub struct PlainSecretCodec;
 
 impl SecretCodec for PlainSecretCodec {

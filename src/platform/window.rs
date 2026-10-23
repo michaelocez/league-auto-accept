@@ -98,6 +98,7 @@ pub fn intercept_close(window: &Window, hide_on_close: bool) {
 
 /// Keeps the close behaviour in step with the `minimizeToTray` setting.
 pub fn set_hide_on_close(hide_on_close: bool) {
+    // Relaxed is sufficient: a lone boolean the window procedure re-reads, published with nothing.
     HIDE_ON_CLOSE.store(hide_on_close, Ordering::Relaxed);
 }
 
@@ -113,6 +114,7 @@ unsafe extern "system" fn close_subclass(
     _reference_data: usize,
 ) -> LRESULT {
     if msg == WM_CLOSE {
+        // Relaxed is sufficient: the subclass re-reads the flag on each close; nothing else rides on it.
         match close_action(HIDE_ON_CLOSE.load(Ordering::Relaxed)) {
             CloseAction::Hide => {
                 log::info!("close intercepted: hiding to tray");

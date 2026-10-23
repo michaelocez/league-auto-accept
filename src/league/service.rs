@@ -54,6 +54,8 @@ struct MachineSession {
 
 impl MachineSession {
     fn new(enabled: Arc<AtomicBool>) -> Self {
+        // Relaxed is sufficient: the flag publishes nothing but itself, and every transition re-reads
+        // it, so a stale value can only delay a toggle by one decision — the documented semantics.
         let initial = enabled.load(Ordering::Relaxed);
         Self {
             machine: ReadyCheckMachine::new(initial),
@@ -63,6 +65,7 @@ impl MachineSession {
 
     /// Applies a runtime Auto Accept change; a no-op while the flag is unchanged.
     fn sync_enabled(&mut self) -> Vec<Effect> {
+        // Relaxed is sufficient for the same reason as `new`: this flag orders no other memory.
         let wanted = self.enabled.load(Ordering::Relaxed);
         if wanted == self.machine.enabled() {
             Vec::new()
@@ -361,6 +364,8 @@ impl LeagueService {
                     tokio::spawn(async move {
                         // Read the live flag at the last possible moment: a toggle that lands
                         // after the timer fired must still prevent the request.
+                        // Relaxed is sufficient: the request and its result are ordered by the
+                        // channel below, not by this flag, which orders no other memory.
                         let ok = enabled.load(Ordering::Relaxed) && rest.accept().await.is_ok();
                         let _ = input_tx
                             .send(MachineInput::AcceptResult { generation, ok })
