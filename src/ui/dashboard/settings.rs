@@ -4,6 +4,7 @@ use gpui::prelude::*;
 use gpui::{div, px, ClickEvent, Context};
 use serde_json::json;
 
+use crate::app::update;
 use crate::config::settings::ThemeMode;
 use crate::platform::glass;
 use crate::ui::components::{Row, SettingsGroup};
@@ -94,6 +95,27 @@ impl Dashboard {
             .gap(theme::space_6())
             .child(window)
             .child(appearance_group)
+            .child(self.version_line(cx))
+            .into_any_element()
+    }
+
+    /// The version footer: the number this build actually shipped as, and a way to reach the
+    /// releases page. Deliberately the quietest text on the screen — it is reference information,
+    /// not a setting.
+    ///
+    /// The link is the project's fixed releases page, chosen here rather than derived from anything
+    /// that could arrive over the network.
+    fn version_line(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = Theme::of(cx);
+        div()
+            .id("version-line")
+            .pt(theme::space_2())
+            .text_size(theme::text_caption())
+            .text_color(t.text_faint)
+            .cursor_pointer()
+            .hover(move |style| style.text_color(t.text))
+            .on_click(|_event: &ClickEvent, _window, app| app.open_url(update::RELEASES_PAGE))
+            .child(format!("League Auto Accept {}", update::VERSION))
             .into_any_element()
     }
 
