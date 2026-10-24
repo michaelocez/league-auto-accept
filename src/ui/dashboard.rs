@@ -20,8 +20,9 @@ use gpui::{
 use serde_json::json;
 
 use crate::app::events::{AppEvent, EventOutcome};
-use crate::app::service::NotificationCommand;
+use crate::app::service::{NotificationCommand, UpdateCommand};
 use crate::app::state::AppState;
+use crate::app::update::CheckGate;
 use crate::config::settings::{AppSettings, BackdropMode};
 use crate::config::store::{save_error_message, SettingsStore};
 use crate::notifications::discord::MAX_TEMPLATE_LENGTH;
@@ -54,6 +55,9 @@ pub struct Dashboard {
     enabled_flag: Arc<AtomicBool>,
     settings_shared: Arc<RwLock<AppSettings>>,
     notifications: async_channel::Sender<NotificationCommand>,
+    updates: async_channel::Sender<UpdateCommand>,
+    /// Makes the release check happen at most once per session, however often Settings is opened.
+    update_check: CheckGate,
     webhook: Entity<InputState>,
     webhook_draft: String,
     mention_nickname: Entity<InputState>,
@@ -79,6 +83,7 @@ impl Dashboard {
         enabled_flag: Arc<AtomicBool>,
         settings_shared: Arc<RwLock<AppSettings>>,
         notifications: async_channel::Sender<NotificationCommand>,
+        updates: async_channel::Sender<UpdateCommand>,
         webhook: Entity<InputState>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -132,6 +137,8 @@ impl Dashboard {
             enabled_flag,
             settings_shared,
             notifications,
+            updates,
+            update_check: CheckGate::default(),
             webhook,
             webhook_draft,
             mention_nickname,
@@ -271,8 +278,21 @@ impl Dashboard {
                 self.state.webhook_test = Some(result);
                 self.state.webhook_testing = false;
             }
+            AppEvent::UpdateCheck(notice) => self.state.apply_update_check(notice),
         }
         EventOutcome::Continue
+    }
+
+    /// Asks for the session's single release check, the first time Settings is opened.
+    ///
+    /// Deliberately the only caller: nothing at startup, no timer, nothing on another screen, and
+    /// the gate means a later visit does not ask again. A check that cannot even be queued (the
+    /// background worker is gone) is not retried and not reported — the version line simply stays
+    /// as it is, which is also what every failed check looks like.
+    fn request_update_check(&mut self) {
+        if self.update_check.begin() {
+            let _ = self.updates.try_send(UpdateCommand::Check);
+        }
     }
 
     /// Flips Auto Accept from the value the UI is showing. The flag the running service reads and the
@@ -420,6 +440,9 @@ impl Render for Dashboard {
             move |target, _event, _window, app| {
                 nav_view.update(app, |this, cx| {
                     this.screen = target;
+                    if target == Screen::Settings {
+                        this.request_update_check();
+                    }
                     cx.notify();
                 });
             },
