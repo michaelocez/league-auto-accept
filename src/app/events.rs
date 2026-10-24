@@ -1,3 +1,4 @@
+use crate::app::update::ReleaseNotice;
 use crate::league::service::ServiceEvent;
 use crate::notifications::discord::WebhookResult;
 use crate::platform::tray::TrayCommand;
@@ -16,6 +17,10 @@ pub enum AppEvent {
     Service(ServiceEvent),
     /// The result of a user-triggered Test Webhook.
     WebhookTest(WebhookResult),
+    /// The answer to the session's single release check: a newer release, or nothing. `None` covers
+    /// both "already up to date" and "no answer" — neither is shown to the user, and neither is an
+    /// error the UI has to render.
+    UpdateCheck(Option<ReleaseNotice>),
 }
 
 impl AppEvent {

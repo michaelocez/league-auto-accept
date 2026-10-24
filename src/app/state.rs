@@ -1,3 +1,4 @@
+use crate::app::update::ReleaseNotice;
 use crate::config::settings::AppSettings;
 use crate::league::ready_check::{Lifecycle, Status as LeagueStatus};
 use crate::league::service::ServiceEvent;
@@ -78,6 +79,10 @@ pub struct AppState {
     pub webhook_test: Option<WebhookResult>,
     /// Whether a Test Webhook request is in flight.
     pub webhook_testing: bool,
+    /// A newer release, once the session's single release check has found one. `None` while no check
+    /// has answered, when there is nothing newer, and when the check failed — all three show the
+    /// same bare version line, so they deliberately share one state.
+    pub newer_release: Option<ReleaseNotice>,
     /// The message shown in the window's error banner: the last settings write that was refused
     /// (the change is still applied in memory), or a background worker that has stopped.
     pub settings_error: Option<String>,
@@ -94,8 +99,14 @@ impl AppState {
             webhook_status,
             webhook_test: None,
             webhook_testing: false,
+            newer_release: None,
             settings_error: None,
         }
+    }
+
+    /// Applies the answer to the session's single release check.
+    pub fn apply_update_check(&mut self, notice: Option<ReleaseNotice>) {
+        self.newer_release = notice;
     }
 
     /// Seeds the error banner with a message that was produced before this state existed — the
@@ -246,6 +257,29 @@ mod tests {
         assert!(state.webhook_status.configured);
         let rendered = format!("{state:?}");
         assert!(!rendered.contains("secret-token-value"), "{rendered}");
+    }
+
+    /// The version line extends only when there really is a newer release. Before an answer, after
+    /// an answer that was not newer, and after one that failed, the state is the same `None` — there
+    /// is no "up to date" claim to make and no failure to show.
+    #[test]
+    fn a_release_notice_reaches_state_only_when_there_is_a_newer_release() {
+        let mut state = AppState::new(AppSettings::default(), WebhookStatus::default());
+        assert_eq!(
+            state.newer_release, None,
+            "nothing is claimed before an answer"
+        );
+
+        let notice = ReleaseNotice {
+            version: "v9.9.9".to_string(),
+            url: "https://github.com/michaelocez/league-auto-accept/releases/tag/v9.9.9"
+                .to_string(),
+        };
+        state.apply_update_check(Some(notice.clone()));
+        assert_eq!(state.newer_release, Some(notice));
+
+        state.apply_update_check(None);
+        assert_eq!(state.newer_release, None, "no answer means no claim");
     }
 
     /// The settings load runs before the view exists, so the banner a failed read produces has to be

@@ -103,19 +103,41 @@ impl Dashboard {
     /// releases page. Deliberately the quietest text on the screen — it is reference information,
     /// not a setting.
     ///
-    /// The link is the project's fixed releases page, chosen here rather than derived from anything
-    /// that could arrive over the network.
+    /// The line is only extended once the session's single release check has found a newer release.
+    /// A check still in flight, a check that found nothing newer, and a check that failed are all
+    /// the bare version, so no failure is ever shown here and no "up to date" claim is made.
+    ///
+    /// The link is the project's fixed releases page unless there is a newer release to point at, in
+    /// which case it is that release's own page — already put through the guard in `update`, so it
+    /// cannot be a URL that arrived over the network unchecked.
     fn version_line(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = Theme::of(cx);
+        let (label, color, url) = match self.state.newer_release.as_ref() {
+            Some(notice) => (
+                format!(
+                    "League Auto Accept {} · version {} is available",
+                    update::VERSION,
+                    notice.version
+                ),
+                t.text_muted,
+                notice.url.clone(),
+            ),
+            None => (
+                format!("League Auto Accept {}", update::VERSION),
+                t.text_faint,
+                update::RELEASES_PAGE.to_string(),
+            ),
+        };
+
         div()
             .id("version-line")
             .pt(theme::space_2())
             .text_size(theme::text_caption())
-            .text_color(t.text_faint)
+            .text_color(color)
             .cursor_pointer()
             .hover(move |style| style.text_color(t.text))
-            .on_click(|_event: &ClickEvent, _window, app| app.open_url(update::RELEASES_PAGE))
-            .child(format!("League Auto Accept {}", update::VERSION))
+            .on_click(move |_event: &ClickEvent, _window, app| app.open_url(&url))
+            .child(label)
             .into_any_element()
     }
 
