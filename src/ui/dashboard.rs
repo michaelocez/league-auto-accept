@@ -65,6 +65,8 @@ pub struct Dashboard {
     mention_error: Option<String>,
     /// A pending debounced settings write; dropping it cancels the write.
     pending_write: Option<Task<()>>,
+    /// Whether the diagnostics report has been copied this session, so the button can say so.
+    diagnostics_copied: bool,
     templates: MessageTemplates,
     /// GPUI subscriptions are RAII — dropping one unsubscribes it — so the vec is held for the
     /// view's lifetime to keep the input handlers attached, even though nothing reads it.
@@ -145,6 +147,7 @@ impl Dashboard {
             mention_id,
             mention_error: None,
             pending_write: None,
+            diagnostics_copied: false,
             templates: MessageTemplates {
                 queue_popped,
                 auto_accepted,

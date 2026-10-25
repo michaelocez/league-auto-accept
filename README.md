@@ -39,6 +39,13 @@ a settings file cannot be read, a diagnostic beside it: `settings.json.invalid`,
 `settings.json.bak` or `settings-write-probe.tmp`, and `settings-error.log` (past 64 KiB the live log
 is rotated to `settings-error.log.1`, and the new one starts empty).
 
+There is **no application log file**: the recent log records live in memory only and die with the
+process. When something actually fails at error level — or the Settings banner reports a refused write
+— the Settings page grows a **Diagnostics** section saying how many errors were recorded and showing
+the most recent one, with **Copy diagnostics** (the app version, the Windows version and build, and the
+record tail, with the Discord webhook URL and any LCU credential redacted) and **Open an issue**. A
+session with nothing wrong shows no such section.
+
 > The executable is unsigned, so Windows SmartScreen may warn on first run ("More info" →
 > "Run anyway"). Code signing is out of scope for now.
 

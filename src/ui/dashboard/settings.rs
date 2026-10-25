@@ -1,14 +1,17 @@
-//! The Settings screen: window behaviour, appearance and the backdrop treatment.
+//! The Settings screen: window behaviour, appearance, the backdrop treatment, and — only once
+//! something has actually failed — the diagnostics that explain it.
 
 use gpui::prelude::*;
-use gpui::{div, px, ClickEvent, Context};
+use gpui::{div, px, ClickEvent, ClipboardItem, Context};
 use serde_json::json;
 
-use crate::app::update;
+use crate::app::{diagnostics, update};
 use crate::config::settings::ThemeMode;
 use crate::platform::glass;
-use crate::ui::components::{Row, SettingsGroup};
-use crate::ui::decisions::ToggleSetting;
+use crate::ui::components::{Button, ButtonVariant, Row, SettingsGroup};
+use crate::ui::decisions::{
+    diagnostics_preview, diagnostics_summary, diagnostics_visible, ToggleSetting,
+};
 use crate::ui::theme::{self, Appearance, SurfaceTreatment, Theme};
 
 use super::Dashboard;
@@ -16,6 +19,11 @@ use super::Dashboard;
 /// The mini window preview shown beside each theme choice.
 const PREVIEW_WIDTH: f32 = 96.0;
 const PREVIEW_HEIGHT: f32 = 64.0;
+
+/// Where "Open an issue" goes. A fixed address in this repository, and never anything a response
+/// could name — the update check's guard exists for the link it receives from the network, and this
+/// one never leaves this file.
+const ISSUE_PAGE: &str = "https://github.com/michaelocez/league-auto-accept/issues/new";
 
 impl Dashboard {
     pub(super) fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -89,14 +97,97 @@ impl Dashboard {
                     .control(backdrop_control),
             );
 
-        div()
+        let mut content = div()
             .flex()
             .flex_col()
             .gap(theme::space_6())
             .child(window)
-            .child(appearance_group)
-            .child(self.version_line(cx))
-            .into_any_element()
+            .child(appearance_group);
+
+        // Nothing to show means no section at all: a Diagnostics heading that is always there would
+        // be decoration, and would teach the user to ignore the one case where it matters.
+        if let Some(section) = self.diagnostics_group(cx) {
+            content = content.child(section);
+        }
+
+        content.child(self.version_line(cx)).into_any_element()
+    }
+
+    /// The Diagnostics section: what failed this session, and the two ways to report it.
+    ///
+    /// Everything shown is already in memory — the app writes no log — so the section says what it
+    /// knows rather than sending the user to a file. The report is the whole of the relevant record
+    /// tail, redacted before it was ever retained, and the issue page is this project's fixed one.
+    fn diagnostics_group(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let t = Theme::of(cx);
+        let errors = diagnostics::error_count();
+        let banner = self.state.settings_error.clone();
+        if !diagnostics_visible(errors, banner.is_some()) {
+            return None;
+        }
+
+        // The newest error is the one worth reading first; the banner is the fallback for a failure
+        // that was reported before the buffer saw it.
+        let preview = diagnostics::latest_error()
+            .or(banner)
+            .map(|text| diagnostics_preview(&text))
+            .unwrap_or_default();
+
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap(theme::space_3())
+            .child(
+                Button::new("copy-diagnostics", "Copy diagnostics")
+                    .variant(ButtonVariant::Secondary)
+                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                        // GPUI's own clipboard: no extra dependency, and the same mechanism the
+                        // text fields already paste through.
+                        cx.write_to_clipboard(ClipboardItem::new_string(diagnostics::report()));
+                        this.diagnostics_copied = true;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("open-issue", "Open an issue")
+                    .variant(ButtonVariant::Ghost)
+                    .on_click(|_event: &ClickEvent, _window, app| app.open_url(ISSUE_PAGE)),
+            );
+
+        Some(
+            SettingsGroup::new()
+                .title("Diagnostics")
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(theme::space_3())
+                        .px(theme::space_4())
+                        .py(theme::space_3())
+                        .child(
+                            div()
+                                .text_size(theme::text_small())
+                                .text_color(t.text)
+                                .child(diagnostics_summary(errors)),
+                        )
+                        .child(
+                            div()
+                                .text_size(theme::text_caption())
+                                .text_color(t.text_muted)
+                                .child(preview),
+                        )
+                        .child(actions)
+                        .when(self.diagnostics_copied, |this| {
+                            this.child(
+                                div()
+                                    .text_size(theme::text_caption())
+                                    .text_color(t.success)
+                                    .child("Copied to the clipboard."),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The version footer: the number this build actually shipped as, and a way to reach the
