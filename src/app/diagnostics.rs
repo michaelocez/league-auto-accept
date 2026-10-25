@@ -31,6 +31,8 @@ pub const MAX_RECORD_BYTES: usize = 2048;
 const TRUNCATION_MARKER: &str = "… (truncated)";
 /// What a redacted value is replaced with.
 const REDACTED: &str = "<redacted>";
+/// What the account-name segment of a user-profile path is replaced with.
+const REDACTED_USER: &str = "<user>";
 
 /// One retained record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,14 +234,17 @@ impl log::Log for DiagnosticsLogger {
     }
 }
 
-/// Every secret shape that must not survive into the buffer.
+/// Every shape that must not survive into the buffer.
 ///
-/// Two, and deliberately only two — a report that redacted indiscriminately would hide the facts a
-/// maintainer needs:
+/// Three, and deliberately only three — a report that redacted indiscriminately would hide the facts
+/// a maintainer needs:
 ///
 /// * a Discord webhook URL, whose *path* is the secret: `/api/webhooks/<id>/<token>`. The host and
 ///   the `/webhooks/` marker are kept, because they are what identifies the line.
 /// * an HTTP `Authorization: Basic …` value, which is the LCU credential.
+/// * the account-name segment of a Windows user-profile path, `C:\Users\<name>\…`. This is not a
+///   secret, but it is the user's own account name going into a public GitHub issue, and it carries
+///   no diagnostic value: the app-relative path is the fact that matters.
 pub fn redact(text: &str) -> String {
     // Per line, because an `Authorization` header's value ends where its line does.
     let mut out = String::with_capacity(text.len());
@@ -247,10 +252,8 @@ pub fn redact(text: &str) -> String {
         if index > 0 {
             out.push('\n');
         }
-        out.push_str(&redact_authorization_value(&redact_runs_after(
-            line,
-            "webhooks/",
-            is_webhook_path_character,
+        out.push_str(&redact_user_profile_segment(&redact_authorization_value(
+            &redact_runs_after(line, "webhooks/", is_webhook_path_character),
         )));
     }
     out
@@ -300,6 +303,66 @@ fn redact_authorization_value(line: &str) -> String {
         "{head}{}",
         redact_runs_after(tail, "basic ", is_base64_character)
     )
+}
+
+/// The path segment that names a Windows user's profile directory, matched case-insensitively.
+const USER_PROFILE_SEGMENT: &str = "users";
+
+/// Redacts the account-name segment of a Windows user-profile path, and nothing else.
+///
+/// `C:\Users\Michael\AppData\…` becomes `C:\Users\<user>\AppData\…`, with either separator accepted
+/// on either side of the name. The word has to be a whole path segment — introduced by a separator
+/// and followed by one — so prose that merely mentions users, or a segment such as `PowerUsers`, is
+/// left as it was written. The marker itself is kept, so the line still says which directory it is.
+fn redact_user_profile_segment(line: &str) -> String {
+    // ASCII-lowercasing preserves byte offsets, so a match found in `lower` indexes `line`.
+    let lower = line.to_ascii_lowercase();
+    let mut out = String::with_capacity(line.len());
+    let mut cursor = 0;
+    while let Some(offset) = lower[cursor..].find(USER_PROFILE_SEGMENT) {
+        let marker_start = cursor + offset;
+        let marker_end = marker_start + USER_PROFILE_SEGMENT.len();
+        // The word is only a path segment when a separator introduces it and one follows it.
+        let introduced_by_separator = line[..marker_start]
+            .chars()
+            .next_back()
+            .is_some_and(is_path_separator);
+        let followed_by_separator = line[marker_end..]
+            .chars()
+            .next()
+            .is_some_and(is_path_separator);
+        if !introduced_by_separator || !followed_by_separator {
+            // Prose, or the word inside a longer segment: keep it exactly as it was written.
+            out.push_str(&line[cursor..marker_end]);
+            cursor = marker_end;
+            continue;
+        }
+        // The matched separator is ASCII, so one byte past the marker is a character boundary. The
+        // name then runs to the next separator, or to the end of the line.
+        let name_start = marker_end + 1;
+        let name_end = name_start + run_end(&line[name_start..], &is_not_path_separator);
+        if name_end == name_start {
+            // Nothing between the separators to replace.
+            out.push_str(&line[cursor..name_start]);
+            cursor = name_start;
+            continue;
+        }
+        out.push_str(&line[cursor..name_start]);
+        out.push_str(REDACTED_USER);
+        cursor = name_end;
+    }
+    out.push_str(&line[cursor..]);
+    out
+}
+
+/// Whether a character separates path segments. A formatted Windows path can arrive with either.
+fn is_path_separator(character: char) -> bool {
+    matches!(character, '\\' | '/')
+}
+
+/// The complement of [`is_path_separator`], so the account name can be scanned up to the next one.
+fn is_not_path_separator(character: char) -> bool {
+    !is_path_separator(character)
 }
 
 /// The characters a Discord webhook path can be made of. The token's own alphabet is a subset; what
@@ -500,6 +563,56 @@ mod tests {
         );
     }
 
+    /// A formatted message can carry either separator, and the marker's case is not what makes it a
+    /// profile path. Both are redacted the same way, and the marker is left as it was written.
+    #[test]
+    fn a_forward_slash_or_upper_case_profile_path_is_redacted_the_same_way() {
+        assert_eq!(
+            redact("path=C:/Users/Michael/AppData/Roaming/League Auto Accept/settings.json"),
+            "path=C:/Users/<user>/AppData/Roaming/League Auto Accept/settings.json"
+        );
+        // Either separator, on either side of the name.
+        assert_eq!(
+            redact("path=C:\\Users/Michael/AppData/settings.json"),
+            "path=C:\\Users/<user>/AppData/settings.json"
+        );
+        assert_eq!(
+            redact("path=C:\\USERS\\Michael\\AppData\\settings.json"),
+            "path=C:\\USERS\\<user>\\AppData\\settings.json"
+        );
+    }
+
+    /// The account name is only replaced when it is a whole path component. A path that merely
+    /// contains the letters is not a user profile.
+    #[test]
+    fn a_path_with_no_profile_component_is_untouched() {
+        assert_eq!(
+            redact("LCU at C:\\Riot Games\\League of Legends\\lockfile"),
+            "LCU at C:\\Riot Games\\League of Legends\\lockfile"
+        );
+        assert_eq!(
+            redact("C:\\PowerUsers\\Michael\\settings.json"),
+            "C:\\PowerUsers\\Michael\\settings.json",
+            "the word inside a longer segment is not the component"
+        );
+    }
+
+    /// The narrowness doctrine in miniature: a record that merely mentions users must come back
+    /// unchanged, or the redaction would be editing prose rather than protecting an account name.
+    #[test]
+    fn prose_that_merely_mentions_users_is_untouched() {
+        assert_eq!(redact("allowed users: 5"), "allowed users: 5");
+        assert_eq!(
+            redact("sharing is enabled for all users/groups"),
+            "sharing is enabled for all users/groups",
+            "a separator after the word is not enough on its own"
+        );
+        assert_eq!(
+            redact("the Users group has three members"),
+            "the Users group has three members"
+        );
+    }
+
     /// The redaction is done on the way in, so even a caller that pushes the URL directly cannot get
     /// it into the report.
     #[test]
@@ -516,13 +629,69 @@ mod tests {
         assert!(report.contains(REDACTED), "{report}");
     }
 
+    /// The record this rule exists for: a refused save names the settings file, and with it the
+    /// account name. The name must go, and every fact a maintainer reads to tell the causes apart —
+    /// the level, the module, the message, the integrity level and both write probes — must stay.
+    #[test]
+    fn a_refused_save_loses_the_account_name_and_keeps_every_fact() {
+        const RECORD: &str = concat!(
+            "league_auto_accept::config::store: settings save refused: Access is denied. (os error 5)",
+            " | path=C:\\Users\\Michael\\AppData\\Roaming\\League Auto Accept\\settings.json",
+            " | integrity=0x1000",
+            " | can create file in directory=false",
+            " | can open existing file for write=false",
+            " | 432 bytes, readonly=false",
+        );
+
+        let buffer = buffer();
+        buffer.push(log::Level::Error, RECORD);
+
+        let entries = buffer.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].level, log::Level::Error, "the level is a fact");
+        assert_eq!(
+            entries[0].text,
+            concat!(
+                "league_auto_accept::config::store: settings save refused: Access is denied. (os error 5)",
+                " | path=C:\\Users\\<user>\\AppData\\Roaming\\League Auto Accept\\settings.json",
+                " | integrity=0x1000",
+                " | can create file in directory=false",
+                " | can open existing file for write=false",
+                " | 432 bytes, readonly=false",
+            ),
+            "only the account name may change"
+        );
+
+        // The copied report is what a public issue receives, so the name must be absent from it in
+        // full, not merely replaced in one field.
+        let report = buffer.report();
+        assert!(
+            !report.contains("Michael"),
+            "the account name must not be copied: {report}"
+        );
+        assert!(
+            report.contains("[ERROR] league_auto_accept::config::store: settings save refused"),
+            "the level and module survive: {report}"
+        );
+        assert!(
+            report.contains("path=C:\\Users\\<user>\\AppData\\Roaming"),
+            "the app-relative path survives: {report}"
+        );
+        assert!(
+            report.contains("integrity=0x1000")
+                && report.contains("can create file in directory=false")
+                && report.contains("can open existing file for write=false"),
+            "the integrity and both probe facts survive: {report}"
+        );
+    }
+
     /// A webhook URL is not the only thing that could be pasted: the redaction must not mangle text
     /// that is merely ordinary, or the report would be less useful than the failure.
     #[test]
     fn ordinary_records_are_left_alone() {
         assert_eq!(
-            redact("settings file: C:\\Users\\Michael\\settings.json"),
-            "settings file: C:\\Users\\Michael\\settings.json"
+            redact("settings file: C:\\ProgramData\\League Auto Accept\\settings.json"),
+            "settings file: C:\\ProgramData\\League Auto Accept\\settings.json"
         );
         assert_eq!(redact("LCU at C:\\Riot Games"), "LCU at C:\\Riot Games");
         assert_eq!(redact(""), "");

@@ -43,8 +43,8 @@ There is **no application log file**: the recent log records live in memory only
 process. When something actually fails at error level — or the Settings banner reports a refused write
 — the Settings page grows a **Diagnostics** section saying how many errors were recorded and showing
 the most recent one, with **Copy diagnostics** (the app version, the Windows version and build, and the
-record tail, with the Discord webhook URL and any LCU credential redacted) and **Open an issue**. A
-session with nothing wrong shows no such section.
+record tail, with the Discord webhook URL, any LCU credential and the Windows account name redacted)
+and **Open an issue**. A session with nothing wrong shows no such section.
 
 > The executable is unsigned, so Windows SmartScreen may warn on first run ("More info" →
 > "Run anyway"). Code signing is out of scope for now.
