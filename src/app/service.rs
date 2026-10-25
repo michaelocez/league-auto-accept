@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use crate::app::events::AppEvent;
+use crate::app::update::{self, GithubReleaseFetcher};
 use crate::config::settings::AppSettings;
 use crate::league::discovery::ClientLocator;
 use crate::league::service::{LeagueService, ServiceEvent};
@@ -25,10 +26,21 @@ pub enum NotificationCommand {
     TestWebhook,
 }
 
+/// Commands the UI sends for the release check.
+///
+/// There is exactly one, and it carries nothing: the endpoint, the headers, the body cap and the
+/// timeout are all fixed. It is a separate channel from [`NotificationCommand`] so the released
+/// Discord command path is untouched by this feature.
+#[derive(Clone, Copy, Debug)]
+pub enum UpdateCommand {
+    Check,
+}
+
 /// Handles for driving the background service from the UI.
 pub struct BackgroundService {
     pub enabled_flag: Arc<AtomicBool>,
     pub notifications: async_channel::Sender<NotificationCommand>,
+    pub update_check: async_channel::Sender<UpdateCommand>,
 }
 
 /// Starts the League service + notifications and bridges their events to `tx`.
@@ -44,6 +56,7 @@ pub fn spawn_league_service(
     let enabled_flag = Arc::new(AtomicBool::new(auto_accept_enabled));
     let enabled_for_service = enabled_flag.clone();
     let (notification_tx, notification_rx) = async_channel::unbounded::<NotificationCommand>();
+    let (update_tx, update_rx) = async_channel::unbounded::<UpdateCommand>();
 
     // The stop report has to go to the channel the UI is waiting on, not to the service channel the
     // bridge forwards — the bridge may be the very thing that died.
@@ -78,6 +91,7 @@ pub fn spawn_league_service(
                         snapshot,
                         Arc::new(DiscordWebhookClient::new()),
                     ));
+                    let release_fetcher = Arc::new(GithubReleaseFetcher::new());
 
                     let bridge_notifications = notifications.clone();
                     let bridge_tx = tx.clone();
@@ -107,6 +121,17 @@ pub fn spawn_league_service(
                                         let _ = tx.send(AppEvent::WebhookTest(result)).await;
                                     });
                                 }
+                                command = update_rx.recv() => {
+                                    let Ok(UpdateCommand::Check) = command else { break };
+                                    // Fire-and-forget, like the Test Webhook above: the answer reaches
+                                    // the UI as an `AppEvent`, and nothing here waits for it.
+                                    let fetcher = release_fetcher.clone();
+                                    let tx = bridge_tx.clone();
+                                    tokio::spawn(async move {
+                                        let notice = update::check_release(fetcher.as_ref()).await;
+                                        let _ = tx.send(AppEvent::UpdateCheck(notice)).await;
+                                    });
+                                }
                             }
                         }
                     };
@@ -128,6 +153,7 @@ pub fn spawn_league_service(
     BackgroundService {
         enabled_flag,
         notifications: notification_tx,
+        update_check: update_tx,
     }
 }
 

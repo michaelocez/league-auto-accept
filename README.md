@@ -158,6 +158,12 @@ with the full validation suite and a Windows build behind it.
 - The Discord webhook URL is written through a typed, validating setter and read only by the
   notification sender; it is absent from application state and redacted in `Debug` output.
 - Discord webhook URLs are validated; outbound requests are constrained and do not follow redirects.
+- No background network requests: the app makes none at startup, on a timer, or while it is closed.
+- Opening **Settings** asks GitHub's public API **once per session** for the latest release tag. That
+  request carries no query parameters and no identifying information — just the app name and version
+  as its `User-Agent` — and the answer is used only to say whether a newer version exists. It never
+  downloads or runs anything, failures are silent, and a link from the answer is opened only if it is
+  on this project's own GitHub path. Otherwise the fixed releases page is used.
 - No analytics, telemetry, updater, or remote content.
 
 ### What this app asks of the League client
@@ -179,9 +185,10 @@ game-phase changes. The subscription is read-only and does not widen the request
 named event scopes are community knowledge rather than documented API, so it is deliberately left
 global rather than narrowed on a guess.
 
-The app talks only to `127.0.0.1` (that local client) and to the Discord webhook you configure
-yourself. It sends no telemetry, runs no other process, and the only thing it changes in the League
-client is accepting a ready check you would otherwise have clicked. Riot does not document or support
+The app talks only to `127.0.0.1` (that local client), to the Discord webhook you configure yourself,
+and — once per session, when you open Settings — to GitHub's public API for the latest release tag.
+It sends no telemetry, runs no other process, and the only thing it changes in the League client is
+accepting a ready check you would otherwise have clicked. Riot does not document or support
 third-party use of this API; this app is an ordinary user-mode program.
 
 ## License

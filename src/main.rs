@@ -83,6 +83,7 @@ fn main() {
     );
     let enabled_flag = background.enabled_flag.clone();
     let notifications = background.notifications.clone();
+    let updates = background.update_check.clone();
     tray::spawn(tx.clone(), settings_shared.clone());
 
     // Closing the main window with minimize-to-tray off exits through this channel, so the pending
@@ -108,6 +109,7 @@ fn main() {
             let enabled_flag = enabled_flag.clone();
             let settings_shared = settings_shared.clone();
             let notifications = notifications.clone();
+            let updates = updates.clone();
             let settings = settings.clone();
             let minimize_to_tray = settings.minimize_to_tray;
             let bounds = Bounds::centered(None, size(px(880.0), px(600.0)), cx);
@@ -149,6 +151,7 @@ fn main() {
                             enabled_flag,
                             settings_shared,
                             notifications,
+                            updates,
                             webhook_input,
                             window,
                             cx,
