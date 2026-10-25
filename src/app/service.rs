@@ -228,6 +228,41 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// The report a user copies is meant for a public GitHub issue, so a webhook URL must not be
+    /// able to reach it.
+    ///
+    /// The path driven here is the real one: the supervisor catching a panic in the background
+    /// worker. It is the one call site in this crate that records text it did not compose — a panic
+    /// payload can be any string, including one a future `expect` built from a webhook URL — and the
+    /// record is made by the logger `main` installs and read back through the report the button
+    /// copies. With the redaction removed, the token and the webhook id appear in the report and
+    /// this test fails.
+    #[test]
+    fn a_webhook_url_in_a_worker_failure_never_reaches_the_diagnostics_report() {
+        const TOKEN: &str = "sentinel-webhook-token-9f8e7d6c5b4a";
+        const URL: &str =
+            "https://discord.com/api/webhooks/12345678901234567/sentinel-webhook-token-9f8e7d6c5b4a";
+
+        // What `main` installs. The buffer and this test agree on the filter's default (`info`),
+        // which is what makes an error record land here at all.
+        crate::app::diagnostics::install();
+
+        let (tx, _rx) = async_channel::unbounded::<AppEvent>();
+        run_supervised("test worker", &tx, || panic!("{URL} was refused"));
+
+        let report = crate::app::diagnostics::report();
+        assert!(!report.contains(TOKEN), "{report}");
+        assert!(!report.contains("12345678901234567"), "{report}");
+        assert!(
+            report.contains("<redacted>"),
+            "the URL must be shown as redacted, not silently missing: {report}"
+        );
+        assert!(
+            report.contains("test worker"),
+            "the failure that carried it must still be in the report: {report}"
+        );
+    }
+
     #[test]
     fn a_panic_payload_is_read_in_either_shape() {
         let borrowed: Box<dyn std::any::Any + Send> = Box::new("borrowed");
