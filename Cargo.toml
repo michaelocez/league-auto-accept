@@ -35,7 +35,13 @@ windows-sys = { version = "0.61", features = [
     "Win32_Graphics_Dwm",
     "Win32_Security",
     "Win32_Security_Cryptography",
+    # `OSVERSIONINFOW`, for the diagnostics report's Windows version.
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    # `RtlGetVersion`, which lives in the WDK namespace (and `OSVERSIONINFOW` above): it is the only
+    # honest way to read the running version, because `GetVersionExW` reports what the manifest
+    # claims without one.
+    "Wdk_System_SystemServices",
     "Win32_UI_Controls",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

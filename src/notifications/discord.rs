@@ -486,6 +486,44 @@ mod tests {
         assert_eq!(empty.status().label(), "Not configured");
     }
 
+    /// No delivery failure may echo the webhook URL: its path *is* the token, and these messages are
+    /// exactly what the in-memory diagnostics report can now retain.
+    ///
+    /// Every refusal reachable without a socket is driven here through the real sender. The socket
+    /// failures take the same shape — `post` discards the transport error entirely and answers with
+    /// one of its own fixed literals — so the URL cannot reach a message from any of them either.
+    #[tokio::test]
+    async fn no_delivery_failure_echoes_the_webhook_url() {
+        let id = "12345678901234567";
+        let token = format!("sentinel{}", "t".repeat(32));
+        let client = DiscordWebhookClient::new();
+
+        let sentinel = format!("https://discord.com/api/webhooks/{id}/{token}");
+        // Each of these is refused before a socket is opened, so the test stays offline: the URL
+        // itself, and then two request faults behind a *valid* URL.
+        let refusals = [
+            (
+                format!("https://evil.test/api/webhooks/{id}/{token}"),
+                "hello",
+                Vec::new(),
+            ),
+            (sentinel.clone(), "", Vec::new()),
+            (sentinel, "hello", vec!["not-an-id".to_string()]),
+        ];
+        for (url, content, user_ids) in refusals {
+            let result = client
+                .send(WebhookRequest {
+                    url: WebhookSecret::new(url),
+                    content: content.into(),
+                    user_ids,
+                })
+                .await;
+            assert!(!result.ok, "this request is meant to be refused");
+            assert!(!result.message.contains(&token), "{}", result.message);
+            assert!(!result.message.contains(id), "{}", result.message);
+        }
+    }
+
     #[test]
     fn allows_mentions_only_for_explicit_ids() {
         let payload = payload_value(

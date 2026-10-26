@@ -30,7 +30,10 @@ use league_auto_accept::ui::theme;
 use league_auto_accept::ui::tray_popup::TrayPopup;
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // The application's single logger: the same `RUST_LOG`-or-`info` filter as before, over a
+    // bounded in-memory buffer, so a failure in the field can be read in Settings rather than
+    // vanishing into a stderr a GUI-subsystem release build does not have. Still no log file.
+    league_auto_accept::app::diagnostics::install();
 
     // Single instance: a second launch signals the first and exits.
     let Some(_guard) = single_instance::acquire() else {

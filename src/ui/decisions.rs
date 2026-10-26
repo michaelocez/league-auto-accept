@@ -79,6 +79,39 @@ pub fn webhook_change(action: &str, result: Result<WebhookStatus, StoreError>) -
     }
 }
 
+/// How much of the most recent error the Diagnostics summary shows.
+pub const DIAGNOSTICS_PREVIEW_CHARACTERS: usize = 180;
+
+/// Whether the Settings page shows a Diagnostics section at all.
+///
+/// Only a real failure earns the section: an error-level record, or the banner that reports one
+/// before the buffer saw it. "Nothing known to be wrong" is not a reason to show it, so an app that
+/// has had a quiet session has no such section to ignore.
+pub fn diagnostics_visible(error_records: usize, has_settings_banner: bool) -> bool {
+    error_records > 0 || has_settings_banner
+}
+
+/// The one line that says how much went wrong, in the plainest terms available.
+pub fn diagnostics_summary(error_records: usize) -> String {
+    match error_records {
+        0 => "A problem was reported this session; no error record was kept.".to_string(),
+        1 => "1 error was recorded this session.".to_string(),
+        count => format!("{count} errors were recorded this session."),
+    }
+}
+
+/// The most recent error, cut to something that fits the card.
+///
+/// The record itself is bounded already; this is about the summary being readable rather than
+/// complete, so the full text stays available in the copy button's report.
+pub fn diagnostics_preview(text: &str) -> String {
+    let mut preview: String = text.chars().take(DIAGNOSTICS_PREVIEW_CHARACTERS).collect();
+    if text.chars().count() > DIAGNOSTICS_PREVIEW_CHARACTERS {
+        preview.push('…');
+    }
+    preview
+}
+
 /// What the Test Webhook button does with the result of queueing its request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WebhookTestStart {
@@ -247,6 +280,58 @@ mod tests {
             rx.try_recv(),
             Ok(NotificationCommand::TestWebhook)
         ));
+    }
+
+    /// The section is the feature's whole condition, so it is pinned here rather than in the render
+    /// code: no error and no banner means no section at all.
+    #[test]
+    fn the_diagnostics_section_appears_only_after_a_real_failure() {
+        assert!(
+            !diagnostics_visible(0, false),
+            "a quiet session has nothing to show and must show nothing"
+        );
+        assert!(diagnostics_visible(1, false), "an error record is enough");
+        assert!(
+            diagnostics_visible(0, true),
+            "a banner the buffer did not see is still a failure"
+        );
+        assert!(diagnostics_visible(3, true));
+    }
+
+    #[test]
+    fn the_diagnostics_summary_states_how_many_errors_there_were() {
+        assert!(diagnostics_summary(0).contains("no error record"));
+        assert_eq!(diagnostics_summary(1), "1 error was recorded this session.");
+        assert_eq!(
+            diagnostics_summary(2),
+            "2 errors were recorded this session."
+        );
+        assert_eq!(
+            diagnostics_summary(17),
+            "17 errors were recorded this session."
+        );
+    }
+
+    /// The preview is a summary, so it is cut; the untruncated text is what the copy button carries,
+    /// and a text that already fits is left exactly as it is.
+    #[test]
+    fn the_diagnostics_preview_is_cut_only_when_it_is_longer_than_the_card() {
+        let short = "settings save refused: Access is denied.";
+        assert_eq!(diagnostics_preview(short), short);
+
+        let at_the_limit = "x".repeat(DIAGNOSTICS_PREVIEW_CHARACTERS);
+        assert_eq!(diagnostics_preview(&at_the_limit), at_the_limit);
+
+        let long = "y".repeat(DIAGNOSTICS_PREVIEW_CHARACTERS + 1);
+        let preview = diagnostics_preview(&long);
+        assert_eq!(preview.chars().count(), DIAGNOSTICS_PREVIEW_CHARACTERS + 1);
+        assert!(preview.ends_with('…'), "{preview}");
+
+        // A multi-byte character split by the cut is still a character, not a byte.
+        let wide = "é".repeat(DIAGNOSTICS_PREVIEW_CHARACTERS + 5);
+        let preview = diagnostics_preview(&wide);
+        assert_eq!(preview.chars().count(), DIAGNOSTICS_PREVIEW_CHARACTERS + 1);
+        assert!(preview.ends_with('…'));
     }
 
     fn refusal(action: &str, error: StoreError) -> String {
