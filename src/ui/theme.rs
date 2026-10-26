@@ -54,6 +54,18 @@ pub enum SurfaceTreatment {
 
 impl Global for SurfaceTreatment {}
 
+impl SurfaceTreatment {
+    /// The treatment's name as the UI writes it, so the backdrop control and any caption that has to
+    /// name a material (see `ui::decisions::backdrop_notice`) cannot describe it differently.
+    pub const fn label(self) -> &'static str {
+        match self {
+            SurfaceTreatment::Opaque => "Opaque",
+            SurfaceTreatment::Mica => "Mica",
+            SurfaceTreatment::Acrylic => "Acrylic",
+        }
+    }
+}
+
 impl From<ThemeMode> for Appearance {
     fn from(mode: ThemeMode) -> Self {
         match mode {
