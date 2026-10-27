@@ -6,7 +6,7 @@
 //! instead the last records live in a bounded buffer, and Settings shows them only once something at
 //! error level has actually been recorded, with a button that copies a report for a GitHub issue.
 //!
-//! Two properties hold that arrangement together:
+//! Three properties hold that arrangement together:
 //!
 //! * Nothing is written anywhere but the buffer. A debug build still forwards every record to
 //!   `env_logger`'s stderr exactly as it always has; a release build deliberately stops at the
@@ -14,6 +14,11 @@
 //! * Every record is redacted on the way in, so the report cannot carry the Discord webhook URL
 //!   (whose path *is* the token), an LCU `Authorization` credential, or anything else listed in
 //!   [`redact`] — however the text reached the logger.
+//! * A record identical to the one made just before it — the same level, and the same text *after*
+//!   redaction — is folded into that entry and counted rather than appended as a second line. Two
+//!   layers recording one failure are two different records (their module prefixes differ) and stay
+//!   two lines; one line recorded repeatedly in a row reads as one line that says how often it
+//!   happened.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -26,6 +31,12 @@ pub const MAX_RECORDS: usize = 256;
 pub const MAX_TOTAL_BYTES: usize = 32 * 1024;
 /// The longest single record kept, so one enormous record cannot flush the whole buffer.
 pub const MAX_RECORD_BYTES: usize = 2048;
+/// The most consecutive identical records one entry accounts for.
+///
+/// The count exists so a repeated line does not become repeated lines, and it stops here so a line
+/// repeated in a loop cannot become a page of digits either. An entry at this count is open-ended:
+/// the report says "1000+" rather than claiming to know a total it stopped counting.
+pub const MAX_REPEATS: u32 = 1000;
 
 /// What the end of a truncated record says.
 const TRUNCATION_MARKER: &str = "… (truncated)";
@@ -41,6 +52,28 @@ pub struct Entry {
     pub level: log::Level,
     /// The record's module and message, already redacted and already bounded.
     pub text: String,
+    /// How many consecutive identical records this entry stands for: at least one, and never more
+    /// than [`MAX_REPEATS`].
+    pub repeats: u32,
+}
+
+impl Entry {
+    /// What the report appends to an entry that stands for more than one identical record.
+    ///
+    /// Empty when the entry was recorded once, so the marker can only ever appear where a count
+    /// genuinely exists. It goes after the entry's level and text, neither of which it changes; it
+    /// is bounded by [`MAX_REPEATS`], so a repeated line cannot lengthen the report without limit;
+    /// and a count at the cap is written open-ended ("1000+"), which is what the stored number
+    /// actually knows.
+    fn repeat_note(&self) -> String {
+        if self.repeats <= 1 {
+            return String::new();
+        }
+        if self.repeats >= MAX_REPEATS {
+            return format!(" [repeated {MAX_REPEATS}+ times]");
+        }
+        format!(" [repeated {} times]", self.repeats)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -60,15 +93,29 @@ pub struct RecordBuffer {
 }
 
 impl RecordBuffer {
-    /// Retains one record, redacted and bounded.
+    /// Retains one record, redacted, bounded, and folded into its predecessor when identical.
     ///
     /// Redaction and truncation happen here rather than at either end, so no caller can put text
     /// into the buffer that came from somewhere else: the logger is not the only possible writer.
+    /// The comparison against the newest entry is made on this redacted text, so a secret is never
+    /// what decides whether two records are the same one.
     pub fn push(&self, level: log::Level, text: &str) {
         let text = truncate(&redact(text));
         let mut inner = self.lock();
+        // Only the entry just made, never the whole buffer: a failure that repeats later, after
+        // other records, is real history whose order matters and keeps its own entry.
+        if let Some(newest) = inner.records.back_mut() {
+            if newest.level == level && newest.text == text {
+                newest.repeats = newest.repeats.saturating_add(1).min(MAX_REPEATS);
+                return;
+            }
+        }
         inner.bytes += text.len();
-        inner.records.push_back(Entry { level, text });
+        inner.records.push_back(Entry {
+            level,
+            text,
+            repeats: 1,
+        });
         // Oldest first: the newest records are the ones worth keeping.
         while inner.records.len() > MAX_RECORDS || inner.bytes > MAX_TOTAL_BYTES {
             let Some(evicted) = inner.records.pop_front() else {
@@ -124,6 +171,9 @@ impl RecordBuffer {
     ///
     /// The tail is exactly what the buffer holds, which is already redacted, so this text can be
     /// pasted into a public issue. Nothing here is escaped: it is meant to be read as it stands.
+    /// Each line is the record's level and its own text; an entry that stands for several
+    /// consecutive identical records additionally ends in a `[repeated N times]` marker, so the
+    /// count survives without the level or the message being touched.
     pub fn report(&self) -> String {
         let entries = self.entries();
         let errors = self.error_count();
@@ -138,7 +188,7 @@ impl RecordBuffer {
         lines.extend(
             entries
                 .iter()
-                .map(|entry| format!("[{}] {}", entry.level, entry.text)),
+                .map(|entry| format!("[{}] {}{}", entry.level, entry.text, entry.repeat_note())),
         );
         format!("{}\n", lines.join("\n"))
     }
@@ -442,11 +492,15 @@ mod tests {
 
     /// The byte cap is what bounds a buffer of large records: 20 records of 2 KiB are far more than
     /// the cap, and fewer than [`MAX_RECORDS`] must be kept.
+    ///
+    /// The records are genuinely different ones, so this keeps testing the byte cap rather than the
+    /// collapsing of identical records — and each is exactly [`MAX_RECORD_BYTES`], prefix included,
+    /// so the retained byte total stays a whole number of records.
     #[test]
     fn the_byte_cap_bounds_the_buffer_before_the_record_count_does() {
         let buffer = buffer();
-        let record = "y".repeat(MAX_RECORD_BYTES);
-        for _ in 0..20 {
+        for index in 0..20 {
+            let record = format!("{index:02}{}", "y".repeat(MAX_RECORD_BYTES - 2));
             buffer.push(log::Level::Warn, &record);
         }
 
@@ -464,6 +518,226 @@ mod tests {
             buffer.bytes(),
             buffer.len() * MAX_RECORD_BYTES,
             "the byte total must be the retained records' own bytes"
+        );
+    }
+
+    /// The shape a pasted report should have: the same level and the same text, recorded twice in a
+    /// row, is one entry that says how many records it stands for — with nothing else altered.
+    #[test]
+    fn two_identical_consecutive_records_collapse_into_one_entry_that_says_two() {
+        let buffer = buffer();
+        buffer.push(log::Level::Error, "settings save refused");
+        buffer.push(log::Level::Error, "settings save refused");
+
+        let entries = buffer.entries();
+        assert_eq!(entries.len(), 1, "the second record is the first one again");
+        assert_eq!(
+            entries[0].level,
+            log::Level::Error,
+            "the level is not altered"
+        );
+        assert_eq!(
+            entries[0].text, "settings save refused",
+            "the message is not altered"
+        );
+        assert_eq!(
+            entries[0].repeats, 2,
+            "the count is the records, not the lines"
+        );
+        assert_eq!(
+            buffer.bytes(),
+            "settings save refused".len(),
+            "no second copy of the text is retained"
+        );
+        assert_eq!(
+            buffer.latest_error().as_deref(),
+            Some("settings save refused"),
+            "the Settings preview reads the record's own text, without the report's marker"
+        );
+
+        let report = buffer.report();
+        assert!(
+            report.contains("[ERROR] settings save refused [repeated 2 times]"),
+            "one line, and it says it happened twice: {report}"
+        );
+    }
+
+    #[test]
+    fn three_identical_consecutive_records_collapse_and_count_three() {
+        let buffer = buffer();
+        for _ in 0..3 {
+            buffer.push(log::Level::Warn, "retrying the accept");
+        }
+
+        let entries = buffer.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].repeats, 3);
+        let report = buffer.report();
+        assert!(
+            report.contains("[WARN] retrying the accept [repeated 3 times]"),
+            "{report}"
+        );
+    }
+
+    /// A collapsed entry is still one entry: the record cap evicts it like any other, so the count
+    /// cannot become a way of holding on to records the cap is supposed to drop.
+    #[test]
+    fn the_record_cap_still_evicts_even_with_a_collapsed_entry() {
+        let buffer = buffer();
+        for _ in 0..50 {
+            buffer.push(log::Level::Warn, "the repeated warning");
+        }
+        let collapsed = buffer.entries();
+        assert_eq!(collapsed.len(), 1, "the 50 identical records are one entry");
+        assert_eq!(collapsed[0].repeats, 50);
+
+        for index in 0..MAX_RECORDS {
+            buffer.push(log::Level::Info, &format!("distinct record {index}"));
+        }
+
+        let entries = buffer.entries();
+        assert_eq!(
+            entries.len(),
+            MAX_RECORDS,
+            "the record cap is exactly the cap"
+        );
+        assert_eq!(
+            buffer.bytes(),
+            entries.iter().map(|entry| entry.text.len()).sum::<usize>(),
+            "the byte total counts only what is retained"
+        );
+        assert_eq!(
+            entries.last().unwrap().text,
+            format!("distinct record {}", MAX_RECORDS - 1),
+            "the newest record is the one kept"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.text == "the repeated warning"),
+            "the collapsed entry, being the oldest, is what the cap evicted"
+        );
+    }
+
+    /// A repeat separated by other records is history, not noise: collapsing must not merge it with
+    /// an earlier same-looking line or move it out of order.
+    #[test]
+    fn non_consecutive_duplicates_stay_separate_entries() {
+        let buffer = buffer();
+        buffer.push(log::Level::Error, "same failure");
+        buffer.push(log::Level::Info, "something else happened");
+        buffer.push(log::Level::Error, "same failure");
+
+        let entries = buffer.entries();
+        assert_eq!(entries.len(), 3, "the ordering is the history");
+        assert_eq!(entries[0].repeats, 1);
+        assert_eq!(entries[1].text, "something else happened");
+        assert_eq!(entries[2].repeats, 1, "the later repeat is its own entry");
+
+        let report = buffer.report();
+        assert_eq!(
+            report.matches("[ERROR] same failure").count(),
+            2,
+            "and it is printed twice: {report}"
+        );
+        assert!(
+            !report.contains("repeated"),
+            "nothing here collapsed: {report}"
+        );
+    }
+
+    #[test]
+    fn the_same_text_at_different_levels_stays_two_entries() {
+        let buffer = buffer();
+        buffer.push(log::Level::Info, "the same words");
+        buffer.push(log::Level::Error, "the same words");
+
+        assert_eq!(buffer.entries().len(), 2, "the level is part of the record");
+        let report = buffer.report();
+        assert!(report.contains("[INFO] the same words"), "{report}");
+        assert!(report.contains("[ERROR] the same words"), "{report}");
+        assert!(!report.contains("repeated"), "{report}");
+    }
+
+    #[test]
+    fn different_text_at_the_same_level_stays_two_entries() {
+        let buffer = buffer();
+        buffer.push(log::Level::Error, "the first failure");
+        buffer.push(log::Level::Error, "the second failure");
+
+        assert_eq!(buffer.entries().len(), 2);
+        assert_eq!(buffer.error_count(), 2, "two failures are two failures");
+    }
+
+    /// The count must not become a second, unbounded kind of record: a loop that records one line
+    /// forever leaves the buffer at a single entry of that line's own bytes, inside both caps.
+    #[test]
+    fn the_bounds_hold_when_every_record_is_identical() {
+        let buffer = buffer();
+        for _ in 0..MAX_RECORDS + 64 {
+            buffer.push(log::Level::Error, "the same failure");
+        }
+
+        assert_eq!(
+            buffer.len(),
+            1,
+            "identical records are one entry, not {MAX_RECORDS}"
+        );
+        assert_eq!(buffer.bytes(), "the same failure".len());
+        assert!(buffer.bytes() <= MAX_TOTAL_BYTES);
+        assert_eq!(
+            buffer.entries()[0].repeats,
+            (MAX_RECORDS + 64) as u32,
+            "the count is how many records arrived"
+        );
+    }
+
+    /// The caps are about text that is retained, so a repeated 2 KiB record is still one record's
+    /// worth of bytes however many times it arrived.
+    #[test]
+    fn the_byte_cap_holds_when_every_record_is_identical() {
+        let buffer = buffer();
+        let record = "z".repeat(MAX_RECORD_BYTES);
+        for _ in 0..100 {
+            buffer.push(log::Level::Warn, &record);
+        }
+
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(
+            buffer.bytes(),
+            MAX_RECORD_BYTES,
+            "one record's bytes, not a hundred"
+        );
+        assert!(buffer.bytes() <= MAX_TOTAL_BYTES);
+        assert_eq!(buffer.entries()[0].repeats, 100);
+    }
+
+    /// A million repetitions must not become a page of digits: the count saturates at
+    /// [`MAX_REPEATS`] and the report says so, so the report's size stops depending on how many
+    /// times the line was recorded.
+    #[test]
+    fn a_huge_repeat_count_is_clamped_and_says_so() {
+        let buffer = buffer();
+        for _ in 0..MAX_REPEATS * 4 {
+            buffer.push(log::Level::Error, "one stubborn failure");
+        }
+
+        let entries = buffer.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].repeats, MAX_REPEATS,
+            "the count stops at the cap"
+        );
+
+        let report = buffer.report();
+        assert!(
+            report.contains("[ERROR] one stubborn failure [repeated 1000+ times]"),
+            "{report}"
+        );
+        assert!(
+            report.len() < 2 * MAX_RECORD_BYTES,
+            "the report must not grow with the repetition count: {} bytes",
+            report.len()
         );
     }
 
@@ -514,6 +788,41 @@ mod tests {
         assert!(
             report.find("alpha") < report.find("beta"),
             "the tail is oldest first: {report}"
+        );
+    }
+
+    /// What a public issue receives: a collapsed entry is one legible line, and the report still
+    /// carries the build, the Windows, the tail's own count, and both kinds of record.
+    #[test]
+    fn the_report_renders_a_collapsed_entry_and_keeps_every_fact() {
+        let buffer = buffer();
+        buffer.push(log::Level::Info, "alpha");
+        buffer.push(log::Level::Error, "beta");
+        buffer.push(log::Level::Error, "beta");
+
+        let report = buffer.report();
+        assert!(report.contains(VERSION), "{report}");
+        assert!(
+            report.contains(&crate::platform::os_version::description()),
+            "the report must say which Windows this is: {report}"
+        );
+        assert!(
+            report.contains("2 record(s) this session, 1 at error level."),
+            "the two entries are what the tail below holds: {report}"
+        );
+        assert!(report.contains("[INFO] alpha"), "{report}");
+        assert!(
+            report.contains("[ERROR] beta [repeated 2 times]"),
+            "{report}"
+        );
+        assert!(
+            report.find("[INFO] alpha") < report.find("[ERROR] beta"),
+            "the tail is still oldest first: {report}"
+        );
+        assert_eq!(
+            report.lines().filter(|line| line.contains("beta")).count(),
+            1,
+            "the repeated line is printed once, not twice: {report}"
         );
     }
 
@@ -627,6 +936,35 @@ mod tests {
         assert!(!report.contains("sentinel-token"), "{report}");
         assert!(!report.contains("22345678901234567"), "{report}");
         assert!(report.contains(REDACTED), "{report}");
+    }
+
+    /// Redaction is applied on the way in, and the comparison is made on that redacted text, so two
+    /// records that differ only in the secret are the same record. Nothing raw is compared, and
+    /// nothing raw is retained: the entry holds the redacted form, and the report holds neither
+    /// secret.
+    #[test]
+    fn records_that_differ_only_in_a_redacted_secret_collapse() {
+        let first =
+            "discord: https://discord.com/api/webhooks/12345678901234567/sentinel-token-one refused";
+        let second =
+            "discord: https://discord.com/api/webhooks/12345678901234567/sentinel-token-two refused";
+
+        let buffer = buffer();
+        buffer.push(log::Level::Error, first);
+        buffer.push(log::Level::Error, second);
+
+        let entries = buffer.entries();
+        assert_eq!(entries.len(), 1, "their redacted forms are identical");
+        assert_eq!(entries[0].repeats, 2);
+        assert_eq!(
+            entries[0].text, "discord: https://discord.com/api/webhooks/<redacted> refused",
+            "the retained text is the redacted one"
+        );
+
+        let report = buffer.report();
+        assert!(!report.contains("sentinel-token"), "{report}");
+        assert!(!report.contains("12345678901234567"), "{report}");
+        assert!(report.contains("[repeated 2 times]"), "{report}");
     }
 
     /// The record this rule exists for: a refused save names the settings file, and with it the
