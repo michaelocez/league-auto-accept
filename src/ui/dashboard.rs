@@ -26,13 +26,13 @@ use crate::app::update::CheckGate;
 use crate::config::settings::{AppSettings, BackdropMode};
 use crate::config::store::{save_error_message, SettingsStore};
 use crate::notifications::discord::MAX_TEMPLATE_LENGTH;
-use crate::platform::glass;
 use crate::platform::tray::TrayCommand;
 use crate::platform::window as platform_window;
 use crate::ui::components::{Row, Toggle};
 use crate::ui::decisions::{self, ToggleSetting, WebhookChange};
 use crate::ui::shell::{PageHeader, Screen, Sidebar, TitleBar};
 use crate::ui::theme::{self, SurfaceTreatment, Theme};
+use crate::ui::treatment;
 
 mod auto_accept;
 mod notifications;
@@ -362,24 +362,20 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Applies a translucent backdrop treatment, falling back to opaque when the OS has no DWM
-    /// backdrop (so the window is never left transparent and unreadable).
+    /// Applies a translucent backdrop treatment through the shared helper, which falls back to opaque
+    /// where the OS has no DWM backdrop (so the window is never left translucent over an opaque clear
+    /// colour).
     fn set_treatment(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         treatment: SurfaceTreatment,
     ) {
-        theme::set_treatment(cx, treatment);
-        // Fall back to opaque where the OS has no DWM backdrop, and persist what actually applied.
-        let effective = if glass::apply(window, theme::current(), treatment) {
-            treatment
-        } else {
-            theme::set_treatment(cx, SurfaceTreatment::Opaque);
-            let _ = glass::apply(window, theme::current(), SurfaceTreatment::Opaque);
-            SurfaceTreatment::Opaque
-        };
-        self.persist(json!({ "windowBackdrop": BackdropMode::from(effective) }));
+        treatment::apply(window, cx, treatment);
+        // The choice is what is stored, not what this machine did with it: a machine that refuses
+        // Mica or Acrylic today may accept it later, and Settings has to be able to say that the
+        // choice was not honoured rather than quietly replacing it.
+        self.persist(json!({ "windowBackdrop": BackdropMode::from(treatment) }));
         cx.notify();
     }
 }

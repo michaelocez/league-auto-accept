@@ -7,12 +7,12 @@ use serde_json::json;
 
 use crate::app::{diagnostics, update};
 use crate::config::settings::ThemeMode;
-use crate::platform::glass;
 use crate::ui::components::{Button, ButtonVariant, Row, SettingsGroup};
 use crate::ui::decisions::{
-    diagnostics_preview, diagnostics_summary, diagnostics_visible, ToggleSetting,
+    backdrop_notice, diagnostics_preview, diagnostics_summary, diagnostics_visible, ToggleSetting,
 };
 use crate::ui::theme::{self, Appearance, SurfaceTreatment, Theme};
+use crate::ui::treatment;
 
 use super::Dashboard;
 
@@ -85,6 +85,13 @@ impl Dashboard {
                 cx,
             ));
 
+        // Only when what is in effect is not what was chosen does the screen owe an explanation; a
+        // saved choice Windows refused is still the user's choice, and it stays saved.
+        let notice = backdrop_notice(
+            SurfaceTreatment::from(self.state.settings.window_backdrop),
+            treatment,
+        );
+
         let appearance_group = SettingsGroup::new()
             .title("Appearance")
             .child(Row::new("Theme").control(theme_control))
@@ -94,7 +101,15 @@ impl Dashboard {
                         "Mica tints from the desktop wallpaper; Acrylic blurs what is behind the \
                          window in real time. Falls back to opaque where unsupported.",
                     )
-                    .control(backdrop_control),
+                    .control(backdrop_control)
+                    .when_some(notice, |this, notice| {
+                        this.child(
+                            div()
+                                .text_size(theme::text_caption())
+                                .text_color(t.text_muted)
+                                .child(notice),
+                        )
+                    }),
             );
 
         let mut content = div()
@@ -241,11 +256,9 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = Theme::of(cx);
-        let label = match value {
-            SurfaceTreatment::Opaque => "Opaque",
-            SurfaceTreatment::Mica => "Mica",
-            SurfaceTreatment::Acrylic => "Acrylic",
-        };
+        // The theme's own name for the material, so this control and the notice that explains a
+        // refused backdrop always call it the same thing.
+        let label = value.label();
         div()
             .id(id)
             .flex()
@@ -310,10 +323,12 @@ impl Dashboard {
             .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
                 theme::set_appearance(cx, value);
                 this.persist(json!({ "themeMode": ThemeMode::from(value) }));
-                // Mica/Acrylic map to a different backdrop variant per appearance, so re-apply.
+                // Mica/Acrylic map to a different backdrop variant per appearance, so re-apply —
+                // through the shared helper, which is what keeps the theme honest if the new variant
+                // is the one this machine refuses.
                 let treatment = theme::current_treatment();
                 if treatment != SurfaceTreatment::Opaque {
-                    let _ = glass::apply(window, value, treatment);
+                    treatment::apply(window, cx, treatment);
                 }
                 cx.notify();
             }))

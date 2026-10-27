@@ -10,6 +10,7 @@ use crate::app::service::NotificationCommand;
 use crate::config::settings::AppSettings;
 use crate::config::store::{webhook_error_message, StoreError};
 use crate::notifications::discord::WebhookStatus;
+use crate::ui::theme::SurfaceTreatment;
 
 /// Which boolean setting a toggle row switch controls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,10 +140,43 @@ pub fn webhook_test_start(
     }
 }
 
+/// The treatment the app should actually use: the requested one where Windows accepted the backdrop,
+/// and `Opaque` where it did not.
+///
+/// `platform::glass` reports only whether a backdrop took; this turns that report into the treatment
+/// the theme should be showing, so the surfaces a window draws can never stay translucent over a
+/// window the OS has made opaque. Every place that applies a treatment settles the theme through it
+/// (`ui::treatment::apply`).
+pub fn effective_treatment(requested: SurfaceTreatment, applied: bool) -> SurfaceTreatment {
+    if applied {
+        requested
+    } else {
+        SurfaceTreatment::Opaque
+    }
+}
+
+/// What Settings says when the treatment in effect is not the one the user chose, and `None` when the
+/// two agree.
+///
+/// The saved choice is deliberately not what this changes: Windows refused the material on this
+/// machine, so this is what says so, while the user's choice stays on disk for a machine that
+/// accepts it later.
+pub fn backdrop_notice(saved: SurfaceTreatment, effective: SurfaceTreatment) -> Option<String> {
+    if saved == effective {
+        return None;
+    }
+    Some(format!(
+        "Windows did not accept the {} window backdrop on this machine, so {} is being used.",
+        saved.label(),
+        effective.label()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::settings::merge_settings;
+    use crate::ui::theme::{window_background, Appearance};
 
     /// Every toggle row must read the setting it names. The event flags start with mixed values on
     /// purpose: with all three `false`, as they are by default, an arm reading the wrong field would
@@ -332,6 +366,92 @@ mod tests {
         let preview = diagnostics_preview(&wide);
         assert_eq!(preview.chars().count(), DIAGNOSTICS_PREVIEW_CHARACTERS + 1);
         assert!(preview.ends_with('…'));
+    }
+
+    /// The whole fallback decision: what Windows accepted is what the theme shows, and a refusal is
+    /// always `Opaque` — never the requested treatment.
+    #[test]
+    fn a_requested_treatment_is_effective_only_when_the_backdrop_was_applied() {
+        // Opaque needs no backdrop, so it is effective either way.
+        assert_eq!(
+            effective_treatment(SurfaceTreatment::Opaque, true),
+            SurfaceTreatment::Opaque
+        );
+        assert_eq!(
+            effective_treatment(SurfaceTreatment::Opaque, false),
+            SurfaceTreatment::Opaque
+        );
+
+        for requested in [SurfaceTreatment::Mica, SurfaceTreatment::Acrylic] {
+            assert_eq!(
+                effective_treatment(requested, true),
+                requested,
+                "a {requested:?} backdrop that was applied must stay as requested"
+            );
+            assert_eq!(
+                effective_treatment(requested, false),
+                SurfaceTreatment::Opaque,
+                "a refused {requested:?} backdrop must fall back to Opaque"
+            );
+        }
+    }
+
+    /// The notice exists only where the two really differ, and it names the material that was
+    /// refused *and* the one in use.
+    #[test]
+    fn the_backdrop_notice_speaks_only_when_the_saved_choice_is_not_in_effect() {
+        for saved in [SurfaceTreatment::Mica, SurfaceTreatment::Acrylic] {
+            let notice = backdrop_notice(saved, effective_treatment(saved, false))
+                .unwrap_or_else(|| panic!("a refused {saved:?} backdrop must be explained"));
+            assert!(
+                notice.contains(saved.label()),
+                "the notice must name what Windows refused: {notice}"
+            );
+            assert!(
+                notice.contains(SurfaceTreatment::Opaque.label()),
+                "the notice must name what is used instead: {notice}"
+            );
+            assert!(notice.contains("did not accept"), "{notice}");
+        }
+
+        // A saved Opaque choice never needs an explanation — nothing was refused.
+        assert_eq!(
+            backdrop_notice(SurfaceTreatment::Opaque, SurfaceTreatment::Opaque),
+            None
+        );
+        // And neither does a choice that is in effect, whether or not it needed a backdrop.
+        for applied in [
+            SurfaceTreatment::Opaque,
+            SurfaceTreatment::Mica,
+            SurfaceTreatment::Acrylic,
+        ] {
+            assert_eq!(
+                backdrop_notice(applied, applied),
+                None,
+                "{applied:?} is in effect, so there is nothing to explain"
+            );
+        }
+    }
+
+    /// The mismatch the defect was about, as close to the window as a test can get without one: the
+    /// decision picks the treatment, the theme turns that treatment into the window's background, and
+    /// after a refusal the two must agree on opaque.
+    #[test]
+    fn a_refused_backdrop_leaves_a_window_that_is_opaque_on_both_sides() {
+        let opaque = window_background(Appearance::Dark, SurfaceTreatment::Opaque);
+
+        for requested in [SurfaceTreatment::Mica, SurfaceTreatment::Acrylic] {
+            assert_ne!(
+                window_background(Appearance::Dark, requested),
+                opaque,
+                "a {requested:?} backdrop that applies is translucent"
+            );
+            assert_eq!(
+                window_background(Appearance::Dark, effective_treatment(requested, false)),
+                opaque,
+                "a refused {requested:?} backdrop must draw opaque"
+            );
+        }
     }
 
     fn refusal(action: &str, error: StoreError) -> String {

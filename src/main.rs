@@ -164,20 +164,18 @@ fn main() {
             )
             .expect("failed to open window");
             // Round the window to match the native Windows 11 look; best-effort on older builds.
-            let _ = handle.update(cx, |_view, window, _cx| {
+            let _ = handle.update(cx, |_view, window, cx| {
                 league_auto_accept::platform::popup::apply_rounded_corners(window);
                 // Let closing hide to the tray while `minimizeToTray` is on; the UI keeps the flag
                 // in step whenever that setting changes.
                 platform_window::intercept_close(window, minimize_to_tray);
                 // Re-apply a persisted Mica/Acrylic backdrop (the window was created with the
-                // matching GPUI background, but the DWM backdrop type is set explicitly).
+                // matching GPUI background, but the DWM backdrop type is set explicitly). The shared
+                // helper settles the theme on what this machine actually accepted, so a backdrop
+                // refused here cannot leave the window opaque while the theme stays translucent.
                 let treatment = theme::current_treatment();
                 if treatment != theme::SurfaceTreatment::Opaque {
-                    let _ = league_auto_accept::platform::glass::apply(
-                        window,
-                        theme::current(),
-                        treatment,
-                    );
+                    league_auto_accept::ui::treatment::apply(window, cx, treatment);
                 }
             });
             view
@@ -269,14 +267,13 @@ fn open_tray_popup(
     ) {
         Ok(handle) => {
             // Borderless popups are square with no shadow by default; ask DWM to round + shadow it.
-            let _ = handle.update(app, |_view, window, _cx| {
+            let _ = handle.update(app, |_view, window, cx| {
                 league_auto_accept::platform::popup::apply_rounded_shadow(window);
-                if theme::current_treatment() != theme::SurfaceTreatment::Opaque {
-                    let _ = league_auto_accept::platform::glass::apply(
-                        window,
-                        theme::current(),
-                        theme::current_treatment(),
-                    );
+                // Same treatment, same helper as the main window: a backdrop this machine refuses
+                // falls back to an opaque theme here too.
+                let treatment = theme::current_treatment();
+                if treatment != theme::SurfaceTreatment::Opaque {
+                    league_auto_accept::ui::treatment::apply(window, cx, treatment);
                 }
             });
             Some(handle)
