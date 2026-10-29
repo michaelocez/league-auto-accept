@@ -4,6 +4,8 @@
 //! the values the view should adopt. That is what makes the handler decisions testable without a
 //! window — including the webhook path whose original shape held a `RefCell` borrow across a `match`.
 
+use std::time::{Duration, Instant};
+
 use serde_json::{json, Value};
 
 use crate::app::service::NotificationCommand;
@@ -170,6 +172,62 @@ pub fn backdrop_notice(saved: SurfaceTreatment, effective: SurfaceTreatment) -> 
         saved.label(),
         effective.label()
     ))
+}
+
+/// How soon after the tray popup hid a tray click still counts as the *same* click.
+///
+/// A click on the tray icon deactivates the popup, and the popup dismisses itself the moment it loses
+/// OS focus (`ui::tray_popup`). So by the time the click's own `OpenPopup` intent is handled, the
+/// popup has usually hidden itself already and a naive handler would re-open what the user meant to
+/// close — the reported defect. Nothing on the intent itself says which click produced it, so the
+/// only evidence is how recently the popup hid: a tray click reaches the handler within a few
+/// milliseconds of the deactivation it caused, while a second, deliberate click on the tray icon
+/// cannot beat the cooldown, which is far longer than any hand can move. The window is therefore
+/// small on purpose: it is the race's length, not a user-facing interval.
+pub const TRAY_POPUP_REOPEN_GUARD: Duration = Duration::from_millis(250);
+
+/// What a tray icon activation does to the popup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrayPopupAction {
+    /// No popup is showing: open it.
+    Show,
+    /// The popup is showing, or the click that arrived is the one that just dismissed it: leave it
+    /// hidden, so the second click on the icon closes the popup instead of re-opening it.
+    KeepHidden,
+}
+
+/// Whether a tray activation opens the popup or leaves it hidden.
+///
+/// `hidden_at` is when the popup last hid, and the popup reports every hide the same way — its own
+/// ✕, Escape, a click elsewhere, or the deactivation of a click on the icon itself — because from
+/// here those are the same event. `is_open` is checked first: a popup that is still up at this point
+/// was closed neither by this click's deactivation nor by anything else, so this click closes it.
+///
+/// Pure on purpose: the whole decision is here so it can be tested against literal instants instead
+/// of a real tray click and a real window.
+pub fn tray_popup_action(
+    is_open: bool,
+    hidden_at: Option<Instant>,
+    now: Instant,
+    guard: Duration,
+) -> TrayPopupAction {
+    if is_open {
+        return TrayPopupAction::KeepHidden;
+    }
+    match hidden_at {
+        // Never hidden: the popup is simply not up yet, so this is a first click.
+        None => TrayPopupAction::Show,
+        Some(hidden_at) => {
+            // `now` cannot precede a recorded hide; saturating keeps a clock that steps backwards
+            // from turning the race's own click into an "old" hide that re-opens the popup.
+            let since_hidden = now.saturating_duration_since(hidden_at);
+            if since_hidden < guard {
+                TrayPopupAction::KeepHidden
+            } else {
+                TrayPopupAction::Show
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -452,6 +510,121 @@ mod tests {
                 "a refused {requested:?} backdrop must draw opaque"
             );
         }
+    }
+
+    /// A tray activation with no popup up is the first click: it opens.
+    #[test]
+    fn a_tray_click_with_no_popup_showing_opens_it() {
+        let now = Instant::now();
+        assert_eq!(
+            tray_popup_action(false, None, now, TRAY_POPUP_REOPEN_GUARD),
+            TrayPopupAction::Show
+        );
+    }
+
+    /// A popup that is still up when the activation is handled is the second click: it closes.
+    #[test]
+    fn a_tray_click_while_the_popup_is_open_closes_it() {
+        let now = Instant::now();
+        // The popup has been up for a while; the hide stamp from an earlier dismissal is old and
+        // irrelevant, which is the point: the open popup wins over any stamp.
+        assert_eq!(
+            tray_popup_action(
+                true,
+                Some(now - TRAY_POPUP_REOPEN_GUARD * 10),
+                now,
+                TRAY_POPUP_REOPEN_GUARD
+            ),
+            TrayPopupAction::KeepHidden
+        );
+        assert_eq!(
+            tray_popup_action(true, None, now, TRAY_POPUP_REOPEN_GUARD),
+            TrayPopupAction::KeepHidden
+        );
+    }
+
+    /// The defect itself: the click deactivates the popup, the popup hides on focus loss, and the
+    /// click's own activation arrives a moment later. It must leave the popup closed.
+    #[test]
+    fn a_click_arriving_just_after_a_focus_loss_hide_does_not_reopen_the_popup() {
+        let now = Instant::now();
+        for elapsed in [
+            Duration::ZERO,
+            Duration::from_millis(1),
+            Duration::from_millis(249),
+        ] {
+            assert_eq!(
+                tray_popup_action(false, Some(now - elapsed), now, TRAY_POPUP_REOPEN_GUARD),
+                TrayPopupAction::KeepHidden,
+                "a hide {elapsed:?} old still belongs to the click being handled"
+            );
+        }
+    }
+
+    /// A hide older than the guard is somebody else's: the popup was dismissed by an earlier click,
+    /// so this click is genuinely the next one and opens it again.
+    #[test]
+    fn a_later_tray_click_after_a_hide_opens_the_popup_again() {
+        let now = Instant::now();
+        for elapsed in [
+            TRAY_POPUP_REOPEN_GUARD,
+            TRAY_POPUP_REOPEN_GUARD + Duration::from_millis(1),
+            Duration::from_secs(2),
+        ] {
+            assert_eq!(
+                tray_popup_action(false, Some(now - elapsed), now, TRAY_POPUP_REOPEN_GUARD),
+                TrayPopupAction::Show,
+                "a hide {elapsed:?} old is no longer this click's"
+            );
+        }
+    }
+
+    /// The boundary in both directions, so the comparison cannot drift from `<` to `<=` unnoticed.
+    #[test]
+    fn the_reopen_guard_boundary_is_exclusive() {
+        let now = Instant::now();
+        let just_inside = TRAY_POPUP_REOPEN_GUARD - Duration::from_millis(1);
+        let just_outside = TRAY_POPUP_REOPEN_GUARD + Duration::from_millis(1);
+
+        assert_eq!(
+            tray_popup_action(false, Some(now - just_inside), now, TRAY_POPUP_REOPEN_GUARD),
+            TrayPopupAction::KeepHidden
+        );
+        assert_eq!(
+            tray_popup_action(
+                false,
+                Some(now - TRAY_POPUP_REOPEN_GUARD),
+                now,
+                TRAY_POPUP_REOPEN_GUARD
+            ),
+            TrayPopupAction::Show,
+            "exactly one guard later the popup opens"
+        );
+        assert_eq!(
+            tray_popup_action(
+                false,
+                Some(now - just_outside),
+                now,
+                TRAY_POPUP_REOPEN_GUARD
+            ),
+            TrayPopupAction::Show
+        );
+    }
+
+    /// A stamp from the future (a clock that stepped backwards, or a hide recorded on another
+    /// timeline) must not be read as an ancient hide that re-opens the popup under the user's click.
+    #[test]
+    fn a_hide_stamp_from_the_future_still_keeps_the_popup_closed() {
+        let now = Instant::now();
+        assert_eq!(
+            tray_popup_action(
+                false,
+                Some(now + Duration::from_secs(1)),
+                now,
+                TRAY_POPUP_REOPEN_GUARD
+            ),
+            TrayPopupAction::KeepHidden
+        );
     }
 
     fn refusal(action: &str, error: StoreError) -> String {
