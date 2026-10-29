@@ -39,7 +39,7 @@ pub const MAX_MENTION_EXPANSION_LENGTH: usize =
 /// This is the single cap for a saved template, derived from Discord's content limit with the
 /// worst-case mention expansion subtracted: every template that fits it also renders inside
 /// Discord's limit once its mentions are substituted. The settings store normalises templates with
-/// exactly this limit and the editor refuses to go past it, so a template can no longer be accepted
+/// exactly this limit and the editor stops the field at it, so a template can no longer be accepted
 /// at a length the store would silently shorten.
 ///
 /// The cost is that a template with no `{mentions}` keeps headroom it does not strictly need; that
@@ -244,8 +244,8 @@ pub fn content_error(content: &str) -> Option<&'static str> {
 /// The template-length rule, checked on the template as typed rather than on the message it
 /// renders to.
 ///
-/// This is the limit the settings store enforces ([`MAX_TEMPLATE_LENGTH`]); the editor uses it so a
-/// template that would be shortened on save is refused while it is being written instead. The
+/// This is the limit the settings store enforces ([`MAX_TEMPLATE_LENGTH`]); the editor stops the
+/// field at it, so a template that would be shortened on save cannot be written instead. The
 /// rendered message is still checked separately by [`content_error`], because a template can sit
 /// inside this cap and still be too long once its mentions expand — that combination is what the
 /// cap's mention budget is sized to prevent, and checking both keeps it cheap to notice if the two

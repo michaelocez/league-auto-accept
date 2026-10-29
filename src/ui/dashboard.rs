@@ -25,7 +25,6 @@ use crate::app::state::AppState;
 use crate::app::update::CheckGate;
 use crate::config::settings::{AppSettings, BackdropMode};
 use crate::config::store::{save_error_message, SettingsStore};
-use crate::notifications::discord::MAX_TEMPLATE_LENGTH;
 use crate::platform::tray::TrayCommand;
 use crate::platform::window as platform_window;
 use crate::ui::components::{Row, Toggle};
@@ -161,9 +160,10 @@ impl Dashboard {
 
     /// An input pre-filled with a saved message template.
     ///
-    /// The stored cap is applied as a validator too, so the field cannot be made longer than the
-    /// length the store keeps: an edit that would exceed [`MAX_TEMPLATE_LENGTH`] is refused rather
-    /// than accepted and then quietly shortened on the next write.
+    /// The stored cap is enforced by the change handler ([`Self::template_subscription`]) rather
+    /// than by a validator, because the two fail differently: a validator refuses the whole edit, so
+    /// a paste that overruns the cap would insert nothing, while the field should keep the part of
+    /// the paste that fits.
     fn template_input(
         value: &str,
         placeholder: &'static str,
@@ -172,9 +172,7 @@ impl Dashboard {
     ) -> Entity<InputState> {
         let value = value.to_string();
         cx.new(move |cx| {
-            let mut state = InputState::new(window, cx)
-                .placeholder(placeholder)
-                .validate(|candidate, _| candidate.chars().count() <= MAX_TEMPLATE_LENGTH);
+            let mut state = InputState::new(window, cx).placeholder(placeholder);
             state.set_value(value, window, cx);
             state
         })
@@ -182,6 +180,11 @@ impl Dashboard {
 
     /// Schedules a template write as the user types; the debounce collapses a burst of keystrokes
     /// into one write. `{mentions}` is substituted at send time.
+    ///
+    /// This is also the single place the stored cap is enforced. The change has already been applied
+    /// by the time this runs, so an edit or paste that went over the cap is trimmed back to it here,
+    /// by removing only the tail that does not fit (`decisions::clamp_template`), which counts
+    /// characters the way the store does and leaves the caret where the user left it.
     fn template_subscription(
         input: &Entity<InputState>,
         window: &mut Window,
@@ -190,8 +193,17 @@ impl Dashboard {
         cx.subscribe_in(
             input,
             window,
-            move |this, _state, event: &InputEvent, _window, cx| {
+            move |this, state, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
+                    let value = state.read(cx).value();
+                    let kept = decisions::clamp_template(&value);
+                    if kept.len() < value.len() {
+                        let overflow = kept.len()..value.len();
+                        state.update(cx, |input, cx| {
+                            input.set_selected_range(overflow, cx);
+                            input.replace("", window, cx);
+                        });
+                    }
                     this.schedule_settings_write(cx);
                     cx.notify();
                 }
