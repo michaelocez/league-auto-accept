@@ -5,22 +5,107 @@
 //! `AppEvent` channel as the tray, so the main window and the popup can never disagree. The native
 //! tray menu remains the right-click fallback; the tray backend stays state/command-only.
 
+use std::time::Instant;
+
 use async_channel::Sender;
 use gpui::prelude::*;
 use gpui::{
     div, px, ClickEvent, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, Render,
-    Subscription, Window,
+    Subscription, Window, WindowHandle, WindowId,
 };
 
 use crate::app::events::AppEvent;
 use crate::platform::tray::TrayCommand;
 use crate::ui::components::{Button, ButtonVariant, Divider, Toggle};
 use crate::ui::dashboard::{status_color, Dashboard};
+use crate::ui::decisions::{tray_popup_action, TrayPopupAction, TRAY_POPUP_REOPEN_GUARD};
 use crate::ui::shell::app_mark;
 use crate::ui::theme::{self, Theme};
 
 /// The close button's hit target.
 const CLOSE_SIZE: f32 = 24.0;
+
+/// Owns the tray popup's window for the shell: what is up, when it last hid, and what a tray click
+/// does to it.
+///
+/// The popup dismisses itself the moment it loses OS focus, so the shell cannot learn it is gone
+/// from the handle alone — and the click that dismisses it *is* the click whose intent arrives next.
+/// Recording when the popup disappeared is what lets [`Self::toggle`] tell "the click being handled
+/// just closed this" from "this closed a while ago, so this click opens it again", through the pure
+/// decision in [`crate::ui::decisions::tray_popup_action`]. This is the only place that holds the
+/// window, so the popup's own render code stays unaware of it.
+pub struct TrayPopupToggle {
+    /// The popup while it is up, and the id the shell matches its close event against. The id is
+    /// kept beside the handle because a closed handle is no longer readable, and the close event
+    /// arrives after the window is already gone.
+    popup: Option<(WindowHandle<TrayPopup>, WindowId)>,
+    /// How the shell closes a window. Injected rather than called here so this type holds no GPUI
+    /// borrow of its own: the caller passes the `App` it already has, and the controller stays a
+    /// plain record of what is up.
+    close: fn(&mut gpui::App, WindowHandle<TrayPopup>),
+    /// When the popup last hid, whatever hid it.
+    hidden_at: Option<Instant>,
+}
+
+impl TrayPopupToggle {
+    pub fn new(close: fn(&mut gpui::App, WindowHandle<TrayPopup>)) -> Self {
+        Self {
+            popup: None,
+            close,
+            hidden_at: None,
+        }
+    }
+
+    /// The id of the popup window while it is up; the shell matches its close event against this.
+    pub fn popup_id(&self) -> Option<WindowId> {
+        self.popup.as_ref().map(|(_, id)| *id)
+    }
+
+    /// Records that the popup hid, and gives up the handle: after this it is not up and not ours.
+    ///
+    /// Every hide ends here — the popup's own dismissal, and the close this controller performs —
+    /// so a later click is always measured from the real hide and never from a stale handle.
+    pub fn record_hidden(&mut self, at: Instant) {
+        self.popup = None;
+        self.hidden_at = Some(at);
+    }
+
+    /// Applies one tray activation: opens the popup, or closes an open one and leaves it closed.
+    ///
+    /// `open` is the caller's "show the popup" action, and is called only when the decision is to
+    /// show, so this type never needs to know how a popup is built or where it is anchored.
+    ///
+    /// The already-hidden case is stamped as well: that click is the one that just dismissed the
+    /// popup through its own deactivation, and stamping the moment keeps this click's dismissal
+    /// attributable to it — so the next click opens, instead of closing what is already gone.
+    pub fn toggle(
+        &mut self,
+        app: &mut gpui::App,
+        now: Instant,
+        open: impl FnOnce(&mut gpui::App) -> Option<WindowHandle<TrayPopup>>,
+    ) {
+        let is_open = self.popup.is_some();
+        match tray_popup_action(is_open, self.hidden_at, now, TRAY_POPUP_REOPEN_GUARD) {
+            TrayPopupAction::KeepHidden => {
+                if let Some((handle, _)) = self.popup.take() {
+                    (self.close)(app, handle);
+                }
+                self.hidden_at = Some(now);
+            }
+            TrayPopupAction::Show => {
+                self.popup = open(app).map(|handle| {
+                    let id = handle.window_id();
+                    (handle, id)
+                });
+                // A popup that could not be opened leaves no hide stamp behind, so the next click
+                // is a fresh attempt rather than one the guard swallows.
+                if self.popup.is_some() {
+                    self.hidden_at = None;
+                }
+            }
+        }
+    }
+}
 
 pub struct TrayPopup {
     dashboard: Entity<Dashboard>,
