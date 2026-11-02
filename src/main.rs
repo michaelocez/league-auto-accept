@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use gpui::{
     point, prelude::*, px, size, App, Bounds, TitlebarOptions, WindowBackgroundAppearance,
@@ -27,7 +28,7 @@ use league_auto_accept::platform::tray::TrayCommand;
 use league_auto_accept::platform::{single_instance, tray, window as platform_window};
 use league_auto_accept::ui::dashboard::Dashboard;
 use league_auto_accept::ui::theme;
-use league_auto_accept::ui::tray_popup::TrayPopup;
+use league_auto_accept::ui::tray_popup::{TrayPopup, TrayPopupToggle};
 
 fn main() {
     // The application's single logger: the same `RUST_LOG`-or-`info` filter as before, over a
@@ -184,20 +185,50 @@ fn main() {
         cx.activate(true);
 
         // Bridge: drain backend/tray events on the GPUI foreground executor and update state.
+        // The tray popup is a separate window owned by the shell, not app state. The controller
+        // around it lives in a cell because the popup dismisses itself on focus loss: its close has
+        // to reach the drain task below, and the only signal for that is the window-closed event
+        // registered here. That is also the event that dates the hide — the popup is already gone
+        // by the time the click which deactivated it arrives, so the handler needs to know *when*
+        // it went away to tell that click from a later one (see `ui::decisions::tray_popup_action`).
+        let popup = Rc::new(RefCell::new(TrayPopupToggle::new(
+            |app, handle: WindowHandle<TrayPopup>| {
+                let _ = handle.update(app, |_view, window, _cx| window.remove_window());
+            },
+        )));
+        let closed = {
+            let popup = popup.clone();
+            cx.on_window_closed(move |_app, closed| {
+                // The controller is borrowed for the length of one tray activation, and a close it
+                // performs itself fires this event from inside that borrow; that click stamps the
+                // hide on the way out, so skipping here loses nothing and avoids a nested borrow.
+                let Ok(mut popup) = popup.try_borrow_mut() else {
+                    return;
+                };
+                if popup.popup_id() == Some(closed) {
+                    popup.record_hidden(Instant::now());
+                }
+            })
+        };
+
         let hwnd_slot = hwnd_slot.clone();
         cx.spawn(async move |cx| {
-            let mut popup: Option<WindowHandle<TrayPopup>> = None;
+            // Held for as long as the application runs, like every other subscription here: a
+            // `Subscription` is RAII, so dropping it would stop the popup's close from being seen.
+            let _closed = closed;
             loop {
                 let Ok(event) = rx.recv().await else {
                     break;
                 };
-                // The tray popup is a separate window owned by the shell, not app state.
+                // The tray popup is a separate window owned by the shell, not app state. A tray
+                // activation toggles it: the first click opens, and a click while it is open — or
+                // the one that just dismissed it by deactivating it — closes it and leaves it shut.
                 if matches!(&event, AppEvent::Tray(TrayCommand::OpenPopup)) {
                     cx.update(|app| {
-                        if let Some(handle) = popup {
-                            let _ = handle.update(app, |_view, window, _cx| window.remove_window());
-                        }
-                        popup = open_tray_popup(app, view.clone(), ui_tx.clone());
+                        let mut toggle = popup.borrow_mut();
+                        let view = view.clone();
+                        let ui_tx = ui_tx.clone();
+                        toggle.toggle(app, Instant::now(), |app| open_tray_popup(app, view, ui_tx));
                     });
                     continue;
                 }
