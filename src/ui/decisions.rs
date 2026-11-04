@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::app::service::NotificationCommand;
 use crate::config::settings::AppSettings;
 use crate::config::store::{webhook_error_message, StoreError};
-use crate::notifications::discord::WebhookStatus;
+use crate::notifications::discord::{WebhookStatus, MAX_TEMPLATE_LENGTH};
 use crate::ui::theme::SurfaceTreatment;
 
 /// Which boolean setting a toggle row switch controls.
@@ -113,6 +113,37 @@ pub fn diagnostics_preview(text: &str) -> String {
         preview.push('…');
     }
     preview
+}
+
+/// The line a message template shows once it is full, so a field that has stopped accepting input
+/// says why instead of looking broken.
+///
+/// It names no number and no budget on purpose: the cap is the interesting fact only at the moment
+/// it applies, and the clause about mentions is the whole explanation for why it sits below
+/// Discord's own message limit. Nothing here is shown while the field still has room.
+pub const TEMPLATE_LIMIT_NOTICE: &str =
+    "Limit reached — space is reserved so your mentions still fit.";
+
+/// Whether a template of `characters` characters has reached the cap, and so should say so.
+///
+/// The comparison is `>=` rather than `==` so the line cannot disappear at a value the field should
+/// never hold anyway: at the cap and past it both mean there is no room left.
+pub fn template_limit_notice(characters: usize) -> Option<&'static str> {
+    (characters >= MAX_TEMPLATE_LENGTH).then_some(TEMPLATE_LIMIT_NOTICE)
+}
+
+/// The text a template field may keep: everything, or the longest prefix inside the character cap.
+///
+/// Counted in characters (Unicode scalar values) exactly as the store counts them, and returned as a
+/// borrowed prefix so trimming an over-long field never re-encodes the text it keeps. The field is
+/// what enforces this (`Dashboard::template_subscription`): an edit or paste that lands over the cap
+/// is cut back to here rather than refused, so a paste keeps the part of itself that fits.
+pub fn clamp_template(value: &str) -> &str {
+    match value.char_indices().nth(MAX_TEMPLATE_LENGTH) {
+        // The byte offset of the first character past the cap, which is a character boundary.
+        Some((cut, _)) => &value[..cut],
+        None => value,
+    }
 }
 
 /// What the Test Webhook button does with the result of queueing its request.
@@ -424,6 +455,81 @@ mod tests {
         let preview = diagnostics_preview(&wide);
         assert_eq!(preview.chars().count(), DIAGNOSTICS_PREVIEW_CHARACTERS + 1);
         assert!(preview.ends_with('…'));
+    }
+
+    /// The affordance is the whole of what a full template field shows: nothing at all while there
+    /// is room, the one line once the value is at the cap, and still that line after a paste has
+    /// been clamped onto the cap (the state a paste really leaves the field in).
+    #[test]
+    fn the_template_limit_notice_appears_only_at_the_cap() {
+        assert_eq!(
+            template_limit_notice(0),
+            None,
+            "an empty field has nothing to explain"
+        );
+        assert_eq!(template_limit_notice(MAX_TEMPLATE_LENGTH / 2), None);
+        assert_eq!(
+            template_limit_notice(MAX_TEMPLATE_LENGTH - 1),
+            None,
+            "one character below the cap is not at it"
+        );
+
+        let notice = template_limit_notice(MAX_TEMPLATE_LENGTH)
+            .expect("the cap itself must say why typing stopped");
+        assert!(notice.contains("mention"), "{notice}");
+        assert_eq!(
+            template_limit_notice(MAX_TEMPLATE_LENGTH),
+            Some(notice),
+            "the line stays while the field stays at the cap"
+        );
+        assert_eq!(
+            template_limit_notice(MAX_TEMPLATE_LENGTH + 1),
+            Some(notice),
+            "an over-cap value is at the limit too, not past the explanation"
+        );
+
+        // A paste that overruns the cap lands on it, and that is the state the line is for.
+        let pasted = "x".repeat(MAX_TEMPLATE_LENGTH * 3);
+        let landed = clamp_template(&pasted).chars().count();
+        assert_eq!(template_limit_notice(landed), Some(notice));
+    }
+
+    /// The clamp is either the whole value or a prefix of it, cut at the cap by characters.
+    #[test]
+    fn the_template_clamp_keeps_the_longest_prefix_inside_the_cap() {
+        // A value already one over the cap comes back exactly at the cap.
+        let over = "t".repeat(MAX_TEMPLATE_LENGTH + 1);
+        assert_eq!(clamp_template(&over).chars().count(), MAX_TEMPLATE_LENGTH);
+
+        // A paste far longer than the cap comes back exactly at the cap, and it is the head of the
+        // paste that is kept rather than an arbitrary slice.
+        let pasted = "y".repeat(MAX_TEMPLATE_LENGTH * 4);
+        let kept = clamp_template(&pasted);
+        assert_eq!(kept.chars().count(), MAX_TEMPLATE_LENGTH);
+        assert_eq!(kept, "y".repeat(MAX_TEMPLATE_LENGTH));
+
+        // A value one below the cap and an empty value are untouched.
+        let below = "z".repeat(MAX_TEMPLATE_LENGTH - 1);
+        assert_eq!(clamp_template(&below), below.as_str());
+        assert_eq!(clamp_template(""), "");
+    }
+
+    /// Multi-byte text is counted in characters, so the cut lands on a character boundary. A byte
+    /// slice at the cap would panic here (`é` is two bytes, so byte 1,881 is inside a character):
+    /// this pins that the kept text is valid and exactly the cap in characters.
+    #[test]
+    fn the_template_clamp_counts_characters_not_bytes() {
+        let wide = "é".repeat(MAX_TEMPLATE_LENGTH + 7);
+        let kept = clamp_template(&wide);
+
+        assert_eq!(kept.chars().count(), MAX_TEMPLATE_LENGTH);
+        assert_eq!(
+            kept.len(),
+            MAX_TEMPLATE_LENGTH * 2,
+            "each é is two bytes, so a byte-counted clamp would keep only half of them"
+        );
+        assert_eq!(kept, "é".repeat(MAX_TEMPLATE_LENGTH));
+        assert!(kept.is_char_boundary(kept.len()));
     }
 
     /// The whole fallback decision: what Windows accepted is what the theme shows, and a refusal is

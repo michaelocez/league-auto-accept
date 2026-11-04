@@ -9,7 +9,6 @@ use crate::app::service::NotificationCommand;
 use crate::config::settings::{is_valid_discord_id, DiscordMention, MAX_DISCORD_USER_IDS};
 use crate::notifications::discord::{
     content_error, parse_discord_webhook_url, preview_notification, template_error,
-    MAX_TEMPLATE_LENGTH,
 };
 use crate::ui::components::{Button, ButtonVariant, Row, SettingsGroup};
 use crate::ui::decisions::{self, ToggleSetting, WebhookTestStart};
@@ -232,9 +231,9 @@ impl Dashboard {
     /// A message template. The text is validated as it will be sent — with `{mentions}` expanded
     /// and the saved mentions substituted — so what is checked is the message Discord receives.
     ///
-    /// The field also carries the stored cap as its own validator (see `Dashboard::template_input`),
-    /// and the character count is shown, so the length the store keeps is visible rather than
-    /// discovered when a saved template comes back shorter.
+    /// The field stops at the stored cap itself (see `Dashboard::template_subscription`), so there is
+    /// no length to keep in view. The only thing rendered is one quiet line once the value is at the
+    /// cap, saying why further typing does nothing.
     fn message_row(
         &self,
         label: &'static str,
@@ -248,14 +247,6 @@ impl Dashboard {
         let rendered = preview_notification(&value, mentions);
         // Being over the stored cap is the more specific problem, so it is the one reported.
         let error = template_error(&value).or_else(|| content_error(&rendered).map(str::to_string));
-        let counter = div()
-            .text_size(theme::text_caption())
-            .text_color(if characters > MAX_TEMPLATE_LENGTH {
-                t.danger
-            } else {
-                t.text_muted
-            })
-            .child(format!("{characters} / {MAX_TEMPLATE_LENGTH} characters"));
 
         Row::new(label)
             .child(
@@ -265,7 +256,10 @@ impl Dashboard {
                     .gap(theme::space_1())
                     .max_w(theme::size_field_max())
                     .child(Self::input_frame(template, cx))
-                    .child(counter),
+                    .child(Self::limit_notice(
+                        &t,
+                        decisions::template_limit_notice(characters),
+                    )),
             )
             .when_some(error, |this, message| {
                 this.child(
@@ -275,6 +269,21 @@ impl Dashboard {
                         .child(message),
                 )
             })
+    }
+
+    /// The line under a full template field, and the space it occupies when there is none.
+    ///
+    /// The slot keeps one caption line's height whether or not the line is drawn, so reaching the cap
+    /// adds the explanation without moving anything below it. The tone is the ordinary muted caption:
+    /// being at the limit is a fact about the field, not a failure.
+    fn limit_notice(t: &Theme, notice: Option<&'static str>) -> impl IntoElement {
+        div()
+            .min_h(theme::text_caption() * 1.5)
+            .flex()
+            .items_center()
+            .text_size(theme::text_caption())
+            .text_color(t.text_muted)
+            .when_some(notice, |this, notice| this.child(notice))
     }
 
     fn render_mentions(&self, t: &Theme, cx: &mut Context<Self>) -> Row {
