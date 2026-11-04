@@ -163,14 +163,14 @@ impl LcuRestClient {
 
     /// `POST /lol-matchmaking/v1/ready-check/accept`.
     pub async fn accept(&self) -> Result<(), TransportError> {
-        let request = LcuRequest::new(HttpMethod::Post, READY_CHECK_ACCEPT_ENDPOINT, None)
+        let request = LcuRequest::new(HttpMethod::Post, READY_CHECK_ACCEPT_ENDPOINT)
             .map_err(TransportError::Request)?;
         self.request(&request).await.map(|_| ())
     }
 
     async fn get(&self, endpoint: &str) -> Result<serde_json::Value, TransportError> {
         let request =
-            LcuRequest::new(HttpMethod::Get, endpoint, None).map_err(TransportError::Request)?;
+            LcuRequest::new(HttpMethod::Get, endpoint).map_err(TransportError::Request)?;
         self.request(&request).await
     }
 
@@ -207,18 +207,9 @@ impl LcuRestClient {
             self.credentials.port,
             self.credentials.authorization(),
         );
-        if let Some(body) = &request.body {
-            head.push_str(&format!(
-                "Content-Type: application/json\r\nContent-Length: {}\r\n",
-                body.len()
-            ));
-        }
         head.push_str("\r\n");
 
-        let mut bytes = head.into_bytes();
-        if let Some(body) = &request.body {
-            bytes.extend_from_slice(body.as_bytes());
-        }
+        let bytes = head.into_bytes();
         tls.write_all(&bytes)
             .await
             .map_err(|error| TransportError::Io(error.to_string()))?;

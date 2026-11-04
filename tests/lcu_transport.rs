@@ -202,6 +202,78 @@ where
     port
 }
 
+/// Serves one TLS connection, recording every request byte it receives: the head, plus a short
+/// grace read that would catch a body written after it.
+async fn spawn_one_request_recorder() -> (u16, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+    let (config, _cert) = server_config();
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let Ok((tcp, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(mut tls) = acceptor.accept(tcp).await else {
+            return;
+        };
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let Ok(read) = tls.read(&mut chunk).await else {
+                return;
+            };
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        // A request with no body ends at the head; the grace read is what would catch a body.
+        if let Ok(Ok(read)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), tls.read(&mut chunk)).await
+        {
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let _ = tx.send(buffer);
+        let _ = tls.write_all(http_response(204, "").as_bytes()).await;
+        let _ = tls.flush().await;
+    });
+
+    (port, rx)
+}
+
+/// Pins the accept call's wire format: the exact request bytes, body included by absence.
+///
+/// The ready-check accept is the project's only LCU write, so its bytes are a compatibility
+/// surface; the mock records the whole request instead of pattern-matching the request line.
+#[tokio::test]
+async fn accept_request_is_byte_for_byte_the_fixed_ready_check_post() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let (port, recorded) = spawn_one_request_recorder().await;
+
+    let client = LcuRestClient::new(credentials(port));
+    client.accept().await.expect("accept should succeed");
+
+    let request = recorded.await.expect("the mock should record one request");
+    assert_eq!(
+        String::from_utf8(request).expect("a request head is valid UTF-8"),
+        format!(
+            "POST /lol-matchmaking/v1/ready-check/accept HTTP/1.1\r\n\
+             Host: 127.0.0.1:{port}\r\n\
+             Accept: application/json\r\n\
+             Authorization: {}\r\n\
+             Connection: close\r\n\r\n",
+            expected_authorization()
+        ),
+        "the accept request must be byte-for-byte the fixed ready-check POST: same method, path \
+         and headers, and no body"
+    );
+}
+
 #[tokio::test]
 async fn rest_transport_authenticates_parses_and_accepts() {
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();

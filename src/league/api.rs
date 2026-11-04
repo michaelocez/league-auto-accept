@@ -32,34 +32,22 @@ impl HttpMethod {
     }
 }
 
-/// A validated LCU request (method + allowed endpoint + optional JSON body).
+/// A validated LCU request (method + allowed endpoint).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LcuRequest {
     pub(crate) method: HttpMethod,
     pub(crate) endpoint: String,
-    pub(crate) body: Option<String>,
 }
 
 impl LcuRequest {
-    /// Builds a request, rejecting unsupported methods/endpoints. The body, when present, must
-    /// already be serialised JSON and is size-checked.
-    pub(crate) fn new(
-        method: HttpMethod,
-        endpoint: &str,
-        body: Option<String>,
-    ) -> Result<Self, LcuRequestError> {
+    /// Builds a request, rejecting unsupported methods/endpoints.
+    pub(crate) fn new(method: HttpMethod, endpoint: &str) -> Result<Self, LcuRequestError> {
         if !is_allowed_lcu_endpoint(endpoint) {
             return Err(LcuRequestError::UnsupportedEndpoint);
-        }
-        if let Some(body) = &body {
-            if body.len() > MAX_REQUEST_BYTES {
-                return Err(LcuRequestError::BodyTooLarge);
-            }
         }
         Ok(Self {
             method,
             endpoint: endpoint.to_string(),
-            body,
         })
     }
 }
@@ -67,24 +55,17 @@ impl LcuRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LcuRequestError {
     UnsupportedEndpoint,
-    BodyTooLarge,
 }
 
 impl std::fmt::Display for LcuRequestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LcuRequestError::UnsupportedEndpoint => write!(f, "unsupported LCU endpoint"),
-            LcuRequestError::BodyTooLarge => {
-                write!(f, "LCU request body exceeded the supported size limit")
-            }
         }
     }
 }
 
 impl std::error::Error for LcuRequestError {}
-
-/// Maximum request body size (1 MiB).
-pub(crate) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 /// Validates an LCU endpoint against the fixed allowlist.
 pub(crate) fn is_allowed_lcu_endpoint(endpoint: &str) -> bool {
@@ -164,19 +145,10 @@ mod tests {
 
     #[test]
     fn builds_requests_and_rejects_invalid_ones() {
-        assert!(LcuRequest::new(HttpMethod::Get, league::GAMEFLOW_ENDPOINT, None).is_ok());
+        assert!(LcuRequest::new(HttpMethod::Get, league::GAMEFLOW_ENDPOINT).is_ok());
         assert_eq!(
-            LcuRequest::new(HttpMethod::Post, "/not-lol/thing", None),
+            LcuRequest::new(HttpMethod::Post, "/not-lol/thing"),
             Err(LcuRequestError::UnsupportedEndpoint)
-        );
-        let oversized = "x".repeat(MAX_REQUEST_BYTES + 1);
-        assert_eq!(
-            LcuRequest::new(
-                HttpMethod::Post,
-                league::READY_CHECK_ACCEPT_ENDPOINT,
-                Some(oversized)
-            ),
-            Err(LcuRequestError::BodyTooLarge)
         );
     }
 
