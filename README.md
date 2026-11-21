@@ -4,6 +4,12 @@ A small, native Windows utility that watches the League of Legends client and au
 ready checks, with optional Discord webhook notifications. Built with **Rust + GPUI** as a
 portable, single-executable app.
 
+> **League of Legends only.** TFT is not supported. Riot's standalone Teamfight Tactics client
+> (patch 18.6 and later) no longer runs inside the League client and does not expose the LCU
+> ready-check API this app uses; its match-found flow is a different, remote AFK check. When only
+> the TFT client is running, the app reports League offline and does not accept anything. See
+> [TFT is not supported](#tft-is-not-supported).
+
 It is an ordinary user-mode application: no installer, no administrator privileges, no background
 service or driver, no telemetry, and no remote content in the UI.
 
@@ -13,6 +19,8 @@ service or driver, no telemetry, and no remote content in the UI.
   against its loopback LCU API.
 - **Monitors ready checks** over the LCU WebSocket and **auto-accepts** them — one accept per ready
   check, with bounded retries, cancellation, and reconnect handling.
+- **League of Legends only**: the standalone TFT client (patch 18.6+) does not expose the LCU
+  ready-check API, so TFT is not supported — see [TFT is not supported](#tft-is-not-supported).
 - **Discord notifications**: webhook alerts for match found,
   auto-accepted, and game-started, with optional `{mentions}` of up to five Discord users.
 - **Appearance**: **Dark** and **Light** themes, plus a window backdrop of **Opaque**,
@@ -64,6 +72,17 @@ and **Open an issue**. A session with nothing wrong shows no such section.
 - **Appearance**: on the Settings page choose **Dark** or **Light**, and a window backdrop —
   **Opaque**, **Mica**, or **Acrylic** (default). Your choices are saved and restored on next
   launch.
+
+## TFT is not supported
+
+This app targets the League of Legends client only.
+
+Before TFT's standalone client, TFT ran inside the League client and its ready checks arrived over the
+same LCU endpoint, so TFT queues were accepted as a side effect. Since patch 18.6 (November 2026),
+TFT is a separate Unreal Engine client with no LCU lockfile or local ready-check API. Its match-found
+step is an AFK check delivered through Riot's remote team-builder service, and accepting it requires a
+different integration — either an authenticated remote request or UI automation. Neither fits this
+app's local-only LCU model, so TFT is deliberately out of scope.
 
 ## Configuration
 
@@ -185,6 +204,9 @@ is no arbitrary-endpoint path:
 | `GET /lol-gameflow/v1/gameflow-phase` | The current game phase, for notifications |
 | `GET /lol-matchmaking/v1/ready-check` | The ready-check snapshot taken on connect |
 | `POST /lol-matchmaking/v1/ready-check/accept` | The only state-changing call: accepting a ready check |
+
+These are League of Legends client endpoints. The standalone TFT client does not serve them; see
+[TFT is not supported](#tft-is-not-supported).
 
 It also subscribes to the client's event stream. That subscription is the client's global JSON API
 event feed, and the app filters it in memory down to the two events it acts on — ready checks and
